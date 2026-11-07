@@ -22,14 +22,12 @@ function fmtTime(ms) {
 }
 
 async function apiPut(path, body) {
-  // SongloftPlugin may not expose apiPut; fall back to apiPost-style if host injects fetch wrapper.
   if (typeof SongloftPlugin.apiPut === "function") {
     return SongloftPlugin.apiPut(path, body);
   }
   if (typeof SongloftPlugin.apiRequest === "function") {
     return SongloftPlugin.apiRequest("PUT", path, body);
   }
-  // Last resort: many hosts route plugin UI through same-origin; try fetch with plugin base.
   const base = (SongloftPlugin.baseUrl || SongloftPlugin.apiBase || "").replace(/\/$/, "");
   const res = await fetch((base || "") + path, {
     method: "PUT",
@@ -55,10 +53,13 @@ async function apiDelete(path, body) {
   return res.json();
 }
 
+/** Last OPML text that passed preview; import reuses it (cancel clears). */
+let pendingOpmlText = null;
+
 function renderSubs(list) {
   const box = $("subList");
   if (!list || !list.length) {
-    box.innerHTML = '<div class="empty">还没有订阅。粘贴公开 RSS URL 后点「添加并拉取」。</div>';
+    box.innerHTML = '<div class="empty">还没有订阅。粘贴公开 RSS URL 后点「添加并拉取」，或导入 OPML。</div>';
     return;
   }
   box.innerHTML = list.map((s) => {
@@ -136,6 +137,53 @@ function applySchedule(data) {
     : "下次：定时未启用";
   const last = "上次成功：" + fmtTime(data.scheduleLastSuccessAt);
   $("scheduleMeta").textContent = last + " · " + next;
+}
+
+function clearOpmlPreview() {
+  pendingOpmlText = null;
+  $("btnOpmlImport").disabled = true;
+  $("opmlSummary").textContent = "";
+  $("opmlList").innerHTML = "";
+}
+
+function statusTag(status) {
+  if (status === "new") return '<span class="tag new">新增</span>';
+  if (status === "duplicate_existing" || status === "duplicate_in_file") {
+    return '<span class="tag dup">重复</span>';
+  }
+  return '<span class="tag bad">无效</span>';
+}
+
+function renderOpmlPreview(payload) {
+  const s = payload.summary || {};
+  const title = payload.documentTitle ? `「${payload.documentTitle}」` : "（无标题）";
+  $("opmlSummary").innerHTML =
+    `${escapeHtml(title)} · 新增 ${s.neu || 0} · 重复 ${s.duplicate || 0} · 无效 ${s.invalid || 0}` +
+    (payload.fileWarnings && payload.fileWarnings.length
+      ? `<div class="warn">文件警告：${escapeHtml(payload.fileWarnings.map((w) => w.message).join("；"))}</div>`
+      : "");
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const box = $("opmlList");
+  if (!items.length) {
+    box.innerHTML = '<div class="empty">没有可展示条目</div>';
+    return;
+  }
+  box.innerHTML = items.slice(0, 200).map((it) => {
+    const warns = (it.warnings || []).map((w) => w.message).join("；");
+    const errs = (it.errors || []).map((e) => e.message).join("；");
+    const path = (it.folderPath && it.folderPath.length)
+      ? escapeHtml(it.folderPath.join(" / ")) + " / "
+      : "";
+    return (
+      `<div class="opml-row">` +
+        statusTag(it.status) +
+        `${path}<strong>${escapeHtml(it.title || "(无标题)")}</strong>` +
+        (it.feedUrl ? `<div class="muted">${escapeHtml(it.feedUrl)}</div>` : "") +
+        (warns ? `<div class="warn">${escapeHtml(warns)}</div>` : "") +
+        (errs ? `<div class="err">${escapeHtml(errs)}</div>` : "") +
+      `</div>`
+    );
+  }).join("");
 }
 
 async function reloadAll() {
@@ -218,6 +266,92 @@ $("btnSaveSchedule").onclick = async () => {
     }
   } catch (e) {
     setFlash("保存失败：" + e, "err");
+  }
+};
+
+$("opmlFile").onchange = async (ev) => {
+  const f = ev.target.files && ev.target.files[0];
+  if (!f) return;
+  try {
+    const text = await f.text();
+    $("opmlText").value = text;
+    clearOpmlPreview();
+    setFlash("已载入文件，请点「预览」", "muted");
+  } catch (e) {
+    setFlash("读取文件失败：" + e, "err");
+  }
+};
+
+$("btnOpmlCancel").onclick = () => {
+  clearOpmlPreview();
+  $("opmlText").value = "";
+  $("opmlFile").value = "";
+  setFlash("已取消 OPML 导入（零写入）", "muted");
+};
+
+$("btnOpmlPreview").onclick = async () => {
+  const text = $("opmlText").value;
+  if (!String(text || "").trim()) {
+    setFlash("请先上传或粘贴 OPML", "warn");
+    return;
+  }
+  setFlash("正在离线预览 OPML…");
+  $("btnOpmlPreview").disabled = true;
+  try {
+    const res = await apiPost("/api/opml/preview", { opml: text });
+    if (!res || !res.ok) {
+      clearOpmlPreview();
+      setFlash((res && res.error) || "预览失败", "err");
+      return;
+    }
+    pendingOpmlText = text;
+    renderOpmlPreview(res);
+    const neu = (res.summary && res.summary.neu) || 0;
+    $("btnOpmlImport").disabled = neu <= 0;
+    setFlash(
+      neu > 0
+        ? `预览完成：可新增 ${neu} 条。确认后才会写入；不会自动刷新 RSS。`
+        : "预览完成：没有可新增条目",
+      neu > 0 ? "ok" : "warn"
+    );
+  } catch (e) {
+    clearOpmlPreview();
+    setFlash("预览失败：" + e, "err");
+  } finally {
+    $("btnOpmlPreview").disabled = false;
+  }
+};
+
+$("btnOpmlImport").onclick = async () => {
+  if (!pendingOpmlText) {
+    setFlash("请先预览", "warn");
+    return;
+  }
+  if (!confirm("确认导入预览中的新增订阅？\n只写入管理项，不会拉取 RSS / 建歌单 / 播放。")) {
+    return;
+  }
+  setFlash("正在导入…");
+  $("btnOpmlImport").disabled = true;
+  try {
+    const res = await apiPost("/api/opml/import", { opml: pendingOpmlText });
+    if (res && res.skipped) {
+      setFlash("导入跳过：忙碌中", "warn");
+      $("btnOpmlImport").disabled = false;
+      return;
+    }
+    if (!res || !res.ok) {
+      setFlash((res && res.error) || "导入失败", "err");
+      $("btnOpmlImport").disabled = false;
+      return;
+    }
+    setFlash(res.tip || `已新增 ${res.added || 0} 条`, "ok");
+    clearOpmlPreview();
+    $("opmlText").value = "";
+    $("opmlFile").value = "";
+    await reloadAll();
+  } catch (e) {
+    setFlash("导入失败：" + e, "err");
+    $("btnOpmlImport").disabled = false;
   }
 };
 

@@ -9,6 +9,7 @@ import {
   REPLACE_NOTE,
   defaultDeps,
 } from "./refresh";
+import { runOpmlImport, runOpmlPreview } from "./opmlImport";
 import {
   appendLog,
   getSubscription,
@@ -35,6 +36,13 @@ function readJson(req: HTTPRequest): Record<string, unknown> {
     }
   }
   return {};
+}
+
+function readOpmlText(body: Record<string, unknown>): string {
+  if (typeof body.opml === "string") return body.opml;
+  if (typeof body.text === "string") return body.text;
+  if (typeof body.xml === "string") return body.xml;
+  return "";
 }
 
 router.get("/api/status", async () => {
@@ -242,6 +250,52 @@ router.post("/api/refresh", async () => {
   return jsonResponse({
     ok: run.ok,
     results: run.results,
+  });
+});
+
+/** Offline OPML preview: parse + classify; zero network. */
+router.post("/api/opml/preview", async (req) => {
+  const body = readJson(req);
+  const text = readOpmlText(body);
+  if (!text.trim()) return jsonResponse({ ok: false, error: "需要 OPML 文本" }, 400);
+  const result = await runOpmlPreview(text);
+  if (!result.ok) return jsonResponse({ ok: false, error: result.reason }, 400);
+  return jsonResponse({
+    ok: true,
+    documentTitle: result.preview.documentTitle,
+    summary: result.preview.summary,
+    items: result.preview.items,
+    fileWarnings: result.preview.fileWarnings,
+    stats: result.parseStats.ok
+      ? result.parseStats.stats
+      : undefined,
+  });
+});
+
+/**
+ * Confirm OPML import: add-only stubs, no RSS fetch/refresh.
+ * Cancel = client simply skips this call (zero writes).
+ */
+router.post("/api/opml/import", async (req) => {
+  const body = readJson(req);
+  const text = readOpmlText(body);
+  if (!text.trim()) return jsonResponse({ ok: false, error: "需要 OPML 文本" }, 400);
+  const result = await runOpmlImport(text);
+  if (result.skipped) {
+    return jsonResponse({ ok: false, skipped: true, error: "skipped_busy" }, 409);
+  }
+  if (!result.ok) {
+    return jsonResponse({ ok: false, error: result.reason || "导入失败" }, 400);
+  }
+  return jsonResponse({
+    ok: true,
+    added: result.added,
+    documentTitle: result.documentTitle,
+    summary: result.preview?.summary,
+    results: result.results,
+    tip: result.added
+      ? `已新增 ${result.added} 条订阅（未自动刷新，可点「刷新全部」）`
+      : "没有新增（均为重复或无效）",
   });
 });
 
