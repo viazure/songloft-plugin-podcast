@@ -1,0 +1,21 @@
+{
+  "$schema": "https://raw.githubusercontent.com/songloft-org/plugin-toolchain/main/schemas/plugin.schema.json",
+  "name": "播客",
+  "version": "0.1.0",
+  "description": "订阅公开播客 RSS，入库为远程曲并覆盖同步到歌单",
+  "author": "viazure",
+  "license": "Apache-2.0",
+  "entryPath": "podcast",
+  "main": "main.jsc",
+  "minHostVersion": "2.8.0",
+  "permissions": [
+    "storage",
+    "songs.read",
+    "songs.write",
+    "playlists.read",
+    "playlists.write"
+  ],
+  "icon": "icon.d61b11cb.png",
+  "entryHash": "ffbdc68a065107ff738ea136fd54d6761c9acca8426882103d0e3174d2674d84",
+  "zipHash": "48e9ad9b190d334cf64e6fa68a07485e41e9144f4fd3bf963bd801f0cba827cc"
+}

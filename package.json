@@ -1,0 +1,19 @@
+{
+  "name": "podcast",
+  "version": "0.1.0",
+  "description": "订阅公开播客 RSS，入库为远程曲并覆盖同步到歌单",
+  "private": true,
+  "scripts": {
+    "build": "songloft-plugin build",
+    "dev": "songloft-plugin dev",
+    "validate": "songloft-plugin validate",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@songloft/plugin-builder": "^2.16.0",
+    "@songloft/plugin-sdk": "^2.16.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
