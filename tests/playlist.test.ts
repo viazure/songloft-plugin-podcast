@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   allocatePlaylistName,
   upsertSubscriptionPlaylist,
@@ -132,5 +132,34 @@ describe("replace semantics", () => {
     expect(b.created).toBe(false);
     expect(b.playlistId).toBe(a.playlistId);
     expect(api.state[0].songs).toEqual([3]);
+  });
+});
+
+describe("non-destructive playlist failures", () => {
+  it("propagates clear failure without deleting/recreating the playlist", async () => {
+    const api = mockApi([{id:1,name:"Demo",songs:[1,2]}]);
+    const del = vi.spyOn(api,"delete");
+    const create = vi.spyOn(api,"create");
+    api.removeSongs = async () => { throw new Error("temporary clear failure"); };
+    await expect(upsertSubscriptionPlaylist(api,{channelTitle:"Demo",songIds:[3],previousPlaylistId:1})).rejects.toThrow("temporary clear failure");
+    expect(del).not.toHaveBeenCalled(); expect(create).not.toHaveBeenCalled();
+    expect(api.state).toEqual([{id:1,name:"Demo",songs:[1,2]}]);
+  });
+
+  it("propagates add failure and retains original playlist ID", async () => {
+    const api = mockApi([{id:1,name:"Demo",songs:[1,2]}]);
+    const del = vi.spyOn(api,"delete"); const create = vi.spyOn(api,"create");
+    api.addSongs = async () => { throw new Error("temporary add failure"); };
+    await expect(upsertSubscriptionPlaylist(api,{channelTitle:"Demo",songIds:[3],previousPlaylistId:1})).rejects.toThrow("temporary add failure");
+    expect(del).not.toHaveBeenCalled(); expect(create).not.toHaveBeenCalled();
+    expect(api.state).toHaveLength(1); expect(api.state[0].id).toBe(1);
+  });
+
+  it("does not create a replacement on temporary list failure", async () => {
+    const api = mockApi([{id:1,name:"Demo",songs:[1]}]);
+    const del = vi.spyOn(api,"delete"); const create = vi.spyOn(api,"create");
+    api.list = async () => { throw new Error("list unavailable"); };
+    await expect(upsertSubscriptionPlaylist(api,{channelTitle:"Demo",songIds:[3],previousPlaylistId:1})).rejects.toThrow("list unavailable");
+    expect(del).not.toHaveBeenCalled(); expect(create).not.toHaveBeenCalled();
   });
 });

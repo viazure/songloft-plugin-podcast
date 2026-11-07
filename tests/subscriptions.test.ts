@@ -250,3 +250,56 @@ describe("subscription CRUD + refresh replace", () => {
     if (!r.ok) expect(r.reason).toMatch(/HTML|RSS/i);
   });
 });
+
+describe("mutation exclusion and URL collision", () => {
+  beforeEach(() => { vi.resetModules(); });
+  const fetchOk = async () => ({ok:true,status:200,text:async()=>SAMPLE}) as Response;
+
+  it("blocks concurrent add/update/delete while add owns the refresh mutex", async () => {
+    const mock = installSongloftMock();
+    const mod = await import("../src/refresh");
+    let entered!:()=>void; const started = new Promise<void>(r=>entered=r);
+    let release!:()=>void; const hold = new Promise<void>(r=>release=r);
+    const deps = {songsApi:(globalThis as any).songloft.songs,playlistsApi:(globalThis as any).songloft.playlists,
+      fetchImpl:(async()=>{entered();await hold;return fetchOk();}) as typeof fetch};
+    const first = mod.addSubscription("https://example.test/one.xml",deps);
+    await started;
+    try {
+      expect(await mod.addSubscription("https://example.test/two.xml",deps)).toMatchObject({ok:false,skipped:true,reason:"skipped_busy"});
+      expect(await mod.updateSubscriptionUrl("missing","https://example.test/three.xml",deps)).toMatchObject({ok:false,skipped:true,reason:"skipped_busy"});
+      expect(await mod.deleteSubscription("missing")).toMatchObject({ok:false,skipped:true,reason:"skipped_busy"});
+      expect(mock.playlists).toHaveLength(0);
+    } finally { release(); }
+    expect((await first).ok).toBe(true);
+    expect(mock.playlists).toHaveLength(1);
+  });
+
+  it("rejects target URL belonging to another subscription without any writes/fetches", async () => {
+    const mock = installSongloftMock(); const mod = await import("../src/refresh"); const store=await import("../src/store");
+    const fetchMock=vi.fn(fetchOk);
+    const deps={songsApi:(globalThis as any).songloft.songs,playlistsApi:(globalThis as any).songloft.playlists,fetchImpl:fetchMock as typeof fetch};
+    const a=await mod.addSubscription("https://example.test/one.xml",deps);
+    const b=await mod.addSubscription("https://example.test/two.xml",deps);
+    if(!a.ok||!b.ok) throw Error("setup failed");
+    const before=JSON.stringify(await store.loadSubscriptions()); const pls=JSON.stringify(mock.playlists);
+    fetchMock.mockClear();
+    const conflict=await mod.updateSubscriptionUrl(a.subscription.id,"https://EXAMPLE.test/two.xml/",deps);
+    expect(conflict.ok).toBe(false); if(!conflict.ok) expect(conflict.reason).toContain("占用");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(JSON.stringify(await store.loadSubscriptions())).toBe(before);
+    expect(JSON.stringify(mock.playlists)).toBe(pls);
+  });
+
+  it("records playlist add errors without deleting stored playlist identity", async () => {
+    installSongloftMock(); const mod=await import("../src/refresh");const store=await import("../src/store");
+    const api=(globalThis as any).songloft;
+    const deps={songsApi:api.songs,playlistsApi:api.playlists,fetchImpl:fetchOk as typeof fetch};
+    const a=await mod.addSubscription("https://example.test/one.xml",deps); if(!a.ok) throw Error("setup failed");
+    const del=vi.spyOn(api.playlists,"delete");
+    api.playlists.addSongs=async()=>{throw Error("add unavailable")};
+    const result=await mod.refreshSubscription(a.subscription.id,deps);
+    expect(result.ok).toBe(false); const saved=await store.getSubscription(a.subscription.id);
+    expect(saved?.playlistId).toBe(a.playlistId); expect(saved?.lastError).toContain("add unavailable");
+    expect(del).not.toHaveBeenCalled();
+  });
+});

@@ -104,13 +104,9 @@ export async function upsertSubscriptionPlaylist(
   const prevId = opts.previousPlaylistId ?? null;
   let existing: Playlist | null = null;
   if (prevId != null) {
-    try {
-      // list fallback if getById not on our narrow type
-      const all = await api.list();
-      existing = (all || []).find((p) => p.id === prevId) || null;
-    } catch {
-      existing = null;
-    }
+    // Propagate lookup errors: transient list failures must not create duplicate playlists.
+    const all = await api.list();
+    existing = (all || []).find((p) => p.id === prevId) || null;
   }
   if (!existing && opts.previousPlaylistName) {
     existing = await findPlaylistByName(api, opts.previousPlaylistName);
@@ -119,29 +115,9 @@ export async function upsertSubscriptionPlaylist(
   if (existing) {
     const playlistId = existing.id;
     const playlistName = existing.name;
-    try {
-      await replacePlaylistSongs(api, playlistId, opts.songIds);
-      return { playlistId, playlistName, created: false, playlistIdChanged: false };
-    } catch (e) {
-      try {
-        await api.delete(playlistId);
-      } catch {
-        /* continue */
-      }
-      const name = await resolveUniquePlaylistName(api, opts.channelTitle, null);
-      const created = await api.create({
-        name,
-        type: "normal",
-        description: opts.description || `播客订阅：${opts.channelTitle}`,
-      });
-      if (opts.songIds.length) await addInChunks(api, created.id, opts.songIds);
-      return {
-        playlistId: created.id,
-        playlistName: created.name,
-        created: true,
-        playlistIdChanged: true,
-      };
-    }
+    // clear+add only. Never delete the existing playlist or swap IDs on transient failure.
+    await replacePlaylistSongs(api, playlistId, opts.songIds);
+    return { playlistId, playlistName, created: false, playlistIdChanged: false };
   }
 
   const name = await resolveUniquePlaylistName(api, opts.channelTitle, null);

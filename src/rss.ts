@@ -58,7 +58,9 @@ function decodeEntities(s: string): string {
 }
 
 function stripTags(s: string): string {
-  return decodeEntities(s.replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
+  // Unwrap CDATA before removing markup; decode escaped entities only afterwards.
+  const unwrapped = s.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, "$1");
+  return decodeEntities(unwrapped.replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
 }
 
 /** First matching tag body (non-greedy). */

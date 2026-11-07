@@ -120,8 +120,8 @@ router.post("/api/subscriptions", async (req) => {
   const result = await addSubscription(url, defaultDeps());
   if (!result.ok) {
     return jsonResponse(
-      { ok: false, error: result.reason, already: !!(result as { already?: boolean }).already },
-      400
+      { ok: false, error: result.reason, already: !!(result as { already?: boolean }).already, skipped: !result.ok && result.skipped },
+      result.reason === "skipped_busy" ? 409 : 400
     );
   }
   return jsonResponse({
@@ -171,9 +171,10 @@ router.put("/api/subscriptions/:id", async (req, params) => {
       {
         ok: false,
         error: result.reason,
+        skipped: result.skipped,
         subscription: result.subscription ? publicSubscription(result.subscription) : undefined,
       },
-      400
+      result.reason === "skipped_busy" ? 409 : 400
     );
   }
   return jsonResponse({
@@ -197,7 +198,7 @@ router.delete("/api/subscriptions/:id", async (req, params) => {
     clearPlaylist,
     playlistsApi: songloft.playlists,
   });
-  if (!result.ok) return jsonResponse({ ok: false, error: result.reason }, 404);
+  if (!result.ok) return jsonResponse({ ok: false, error: result.reason, skipped: result.skipped }, result.skipped ? 409 : 404);
   return jsonResponse({
     ok: true,
     tip: result.tip,

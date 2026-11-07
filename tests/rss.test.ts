@@ -101,3 +101,32 @@ describe("fetchRss", () => {
     if (!r.ok) expect(r.reason).toMatch(/404/);
   });
 });
+
+describe("CDATA regression (synthetic fixtures only)", () => {
+  it("preserves channel/item title, author, guid, description and duration", () => {
+    const r = parseRssXml(`<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel>
+      <title><![CDATA[测试频道 & 杂谈]]></title><itunes:author><![CDATA[测试作者]]></itunes:author>
+      <description><![CDATA[<p>频道介绍</p>]]></description>
+      <item><title><![CDATA[中文剧集 😀]]></title><guid><![CDATA[episode-1]]></guid>
+      <description><![CDATA[<b>剧集介绍</b>]]></description>
+      <itunes:duration><![CDATA[01:02:03]]></itunes:duration>
+      <enclosure url="https://example.test/one.m4a" type="audio/mp4"/></item>
+    </channel></rss>`);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.channel.title).toBe("测试频道 & 杂谈");
+    expect(r.channel.author).toBe("测试作者");
+    expect(r.channel.description).toBe("频道介绍");
+    expect(r.channel.episodes[0]).toMatchObject({title:"中文剧集 😀",guid:"episode-1",description:"剧集介绍",durationSec:3723});
+  });
+
+  it("preserves escaped angle brackets as literal text", () => {
+    const r = parseRssXml(`<rss><channel><title>频道 &lt;测试&gt;</title>
+      <item><title>剧集 &lt;一&gt;</title><enclosure url="https://example.test/a.mp3" type="audio/mpeg"/></item>
+      </channel></rss>`);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.channel.title).toBe("频道 <测试>");
+    expect(r.channel.episodes[0].title).toBe("剧集 <一>");
+  });
+});

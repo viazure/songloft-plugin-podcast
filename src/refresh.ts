@@ -53,6 +53,7 @@ export interface RefreshOk {
 
 export interface RefreshFail {
   ok: false;
+  skipped?: boolean;
   reason: string;
   subscription?: Subscription;
 }
@@ -267,7 +268,7 @@ export async function refreshSubscription(
 /**
  * Add subscription: validate, persist, immediate refresh.
  */
-export async function addSubscription(
+async function addSubscriptionUnlocked(
   urlRaw: string,
   deps: RefreshDeps
 ): Promise<RefreshResult & { already?: boolean }> {
@@ -306,11 +307,21 @@ export async function addSubscription(
   return refreshSubscription(id, deps);
 }
 
+/** Add subscription under exclusive lock (shared with refresh / mutate). */
+export async function addSubscription(
+  urlRaw: string,
+  deps: RefreshDeps
+): Promise<RefreshResult & { already?: boolean }> {
+  const gate = await refreshScheduler.runExclusive(() => addSubscriptionUnlocked(urlRaw, deps));
+  if (gate.skipped) return { ok: false, reason: "skipped_busy", skipped: true };
+  return gate.result;
+}
+
 /**
  * Update subscription URL (re-validate + refresh). Keeps same id if URL host-path changes → new id.
  * Architect: 增/删/改 — we replace url in place when possible; if feedId changes, migrate.
  */
-export async function updateSubscriptionUrl(
+async function updateSubscriptionUrlUnlocked(
   id: string,
   urlRaw: string,
   deps: RefreshDeps
@@ -319,6 +330,16 @@ export async function updateSubscriptionUrl(
   if (!url) return { ok: false, reason: "URL 为空" };
   const sub = await getSubscription(id);
   if (!sub) return { ok: false, reason: "订阅不存在" };
+
+  const list = await loadSubscriptions();
+  const conflict = findByUrl(list, url);
+  if (conflict && conflict.id !== id) {
+    return {
+      ok: false,
+      reason: `该 URL 已被订阅「${conflict.title}」占用`,
+      subscription: sub,
+    };
+  }
 
   const validated = await validateFeedUrl(url, deps.fetchImpl || fetch);
   if (!validated.ok) return { ok: false, reason: validated.reason };
@@ -356,10 +377,23 @@ export async function updateSubscriptionUrl(
   return refreshSubscription(id, deps);
 }
 
+/** Update subscription URL under exclusive lock. */
+export async function updateSubscriptionUrl(
+  id: string,
+  urlRaw: string,
+  deps: RefreshDeps
+): Promise<RefreshResult> {
+  const gate = await refreshScheduler.runExclusive(() =>
+    updateSubscriptionUrlUnlocked(id, urlRaw, deps)
+  );
+  if (gate.skipped) return { ok: false, reason: "skipped_busy", skipped: true };
+  return gate.result;
+}
+
 /**
  * Delete management entry only; optionally clear playlist songs (keep playlist + remotes).
  */
-export async function deleteSubscription(
+async function deleteSubscriptionUnlocked(
   id: string,
   opts: { clearPlaylist?: boolean; playlistsApi?: PlaylistsApi } = {}
 ): Promise<{
@@ -381,6 +415,16 @@ export async function deleteSubscription(
   }
   await appendLog("info", `已删除订阅「${removed.title}」`);
   return { ok: true, tip, removed };
+}
+
+/** Delete subscription management row under exclusive lock. */
+export async function deleteSubscription(
+  id: string,
+  opts: { clearPlaylist?: boolean; playlistsApi?: PlaylistsApi } = {}
+): Promise<{ ok: boolean; reason?: string; tip?: string; removed?: Subscription; skipped?: boolean }> {
+  const gate = await refreshScheduler.runExclusive(() => deleteSubscriptionUnlocked(id, opts));
+  if (gate.skipped) return { ok: false, reason: "skipped_busy", skipped: true };
+  return gate.result;
 }
 
 export async function refreshAll(deps: RefreshDeps): Promise<{
