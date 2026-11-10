@@ -156,7 +156,7 @@ export function episodeRowHtml(ep, idx, opts = {}) {
     `</div>` +
     `</div>` +
     `<div class="actions-row">` +
-    `<button type="button" class="icon-btn icon-btn--primary" data-play-btn data-idx="${idx}" title="播放">` +
+    `<button type="button" class="icon-btn icon-btn--play" data-play-btn data-idx="${idx}" title="播放">` +
     `${icon(playIcon, 17)}</button>` +
     actions +
     (opts.moreHtml || "") +

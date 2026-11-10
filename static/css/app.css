@@ -27,22 +27,38 @@
 
   --canvas: Canvas;
   --surface: Canvas;
-  /* Subdued fill for occasional bands/hover only — cards use Canvas itself. */
-  --surface-2: color-mix(in srgb, CanvasText 2.5%, Canvas);
-  --surface-3: color-mix(in srgb, CanvasText 6%, Canvas);
+  /* List wells / soft bands (Moon FM「收听」浅底). */
+  --surface-2: color-mix(in srgb, CanvasText 3.5%, Canvas);
+  --surface-3: color-mix(in srgb, CanvasText 7%, Canvas);
   --scrim: rgba(0, 0, 0, 0.38);
 
   --text: CanvasText;
-  --muted: color-mix(in srgb, CanvasText 62%, transparent);
-  --border: color-mix(in srgb, CanvasText 10%, transparent);
-  --border-strong: color-mix(in srgb, CanvasText 18%, transparent);
+  --muted: color-mix(in srgb, CanvasText 58%, transparent);
+  /* Meta line one half-step lighter than body muted. */
+  --muted-soft: color-mix(in srgb, CanvasText 46%, transparent);
+  --border: color-mix(in srgb, CanvasText 9%, transparent);
+  --border-strong: color-mix(in srgb, CanvasText 16%, transparent);
+  --border-faint: color-mix(in srgb, CanvasText 6%, transparent);
+
+  /* Soft cool-gray-blue for duration capsules (pairs with brand, not competing). */
+  --chip-cool: color-mix(in srgb, #64748b 12%, Canvas);
+  --chip-cool-ink: color-mix(in srgb, #475569 70%, CanvasText);
 
   --radius-xs: 6px;
   --radius-sm: 8px;
   --radius: 12px;
+  --radius-md: 14px;
   --radius-lg: 16px;
+  --radius-row: 17px;
   --radius-xl: 20px;
   --radius-pill: 999px;
+
+  --row-pad: 15px;
+  --row-gap: 9px;
+  --cover-size: 58px;
+  --cover-radius: 12px;
+  --action-size: 33px;
+  --action-radius: 10px;
 
   --space-1: 4px;
   --space-2: 8px;
@@ -72,9 +88,17 @@
    otherwise brand-soft / borders disappear against Canvas. */
 @media (prefers-color-scheme: dark) {
   :root {
-    --brand-soft: color-mix(in srgb, var(--brand) 20%, Canvas);
+    --brand-soft: color-mix(in srgb, var(--brand) 22%, Canvas);
+    --surface-2: color-mix(in srgb, CanvasText 5%, Canvas);
+    --surface-3: color-mix(in srgb, CanvasText 9%, Canvas);
     --border: color-mix(in srgb, CanvasText 14%, transparent);
     --border-strong: color-mix(in srgb, CanvasText 22%, transparent);
+    --border-faint: color-mix(in srgb, CanvasText 10%, transparent);
+    --muted: color-mix(in srgb, CanvasText 55%, transparent);
+    --muted-soft: color-mix(in srgb, CanvasText 42%, transparent);
+    --chip-cool: color-mix(in srgb, #94a3b8 16%, Canvas);
+    --chip-cool-ink: color-mix(in srgb, #cbd5e1 75%, CanvasText);
+    --shadow-1: 0 1px 4px color-mix(in srgb, #000 28%, transparent);
   }
   /* brand-strong is too dark to read on the dark tinted pill. */
   .nav button[aria-current="page"] { color: var(--brand); }
@@ -272,6 +296,7 @@ main > section > .card:not(.card--fill) {
    otherwise the left column ends a few pixels above the playlist panel. */
 #tab-recent > .card--fill,
 #tab-favorites > .card--fill,
+#tab-history > .card--fill,
 #tab-subs > .card--fill {
   margin-bottom: 0;
 }
@@ -392,50 +417,62 @@ main > section > .card:not(.card--fill) {
 .search__clear:hover { background: var(--surface-3); }
 
 /* ---------- list rows ---------- */
-.ep-list, .q-list, .fav-list, .sub-grid {
+.ep-list, .q-list, .fav-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--row-gap);
+  background: var(--surface-2);
+  border-radius: var(--radius-lg);
+  padding: 10px;
 }
-.date-group { display: flex; flex-direction: column; gap: 10px; }
+.date-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--row-gap);
+  margin-top: 2px;
+}
+.date-group + .date-group { margin-top: 6px; }
 .date-label {
   align-self: flex-start;
-  font-size: 0.8rem;
-  font-weight: 650;
-  padding: 4px 12px;
-  border-radius: var(--radius-pill);
-  background: var(--canvas);
-  border: 1px solid var(--border);
-  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  padding: 2px 4px 4px;
+  border: 0;
+  background: transparent;
+  color: var(--muted-soft);
   white-space: nowrap;
 }
 
 .ep-row, .q-row, .fav-row {
-  border: 1px solid color-mix(in srgb, CanvasText 9%, transparent);
-  border-radius: var(--radius);
-  padding: 12px;
+  border: 1px solid var(--border-faint);
+  border-radius: var(--radius-row);
+  padding: var(--row-pad);
   background: var(--canvas);
-  transition: border-color 0.15s ease, background 0.15s ease;
+  box-shadow: var(--shadow-1);
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
 }
 .ep-row:hover, .q-row:hover, .fav-row:hover {
-  border-color: var(--border-strong);
+  border-color: var(--border);
+  box-shadow: var(--shadow-1), 0 0 0 1px color-mix(in srgb, CanvasText 3%, transparent);
 }
 /* Now-playing row: same accent as everything else, no extra hue. */
 .q-row.is-current, .fav-row.is-current, .ep-row.is-current {
-  border-color: color-mix(in srgb, var(--brand) 40%, transparent);
+  border-color: color-mix(in srgb, var(--brand) 36%, transparent);
   background: var(--brand-soft);
+  box-shadow: var(--shadow-1);
 }
 
 .ep-head, .fav-head {
   display: grid;
-  grid-template-columns: 52px minmax(0, 1fr);
+  grid-template-columns: var(--cover-size) minmax(0, 1fr);
   gap: 12px;
   align-items: start;
 }
-.ep-head.q-head { grid-template-columns: 20px 52px minmax(0, 1fr); }
+.ep-head.q-head { grid-template-columns: 20px var(--cover-size) minmax(0, 1fr); }
 .ep-cover {
-  width: 52px; height: 52px;
-  border-radius: 10px;
+  width: var(--cover-size); height: var(--cover-size);
+  border-radius: var(--cover-radius);
   object-fit: cover;
   background: var(--surface-3);
   flex: 0 0 auto;
@@ -447,17 +484,18 @@ main > section > .card:not(.card--fill) {
   background: var(--surface-3);
 }
 .cover-ph {
-  width: 52px; height: 52px;
-  border-radius: 10px;
-  font-size: 1.05rem;
+  width: var(--cover-size); height: var(--cover-size);
+  border-radius: var(--cover-radius);
+  font-size: 1.1rem;
   font-weight: 700;
   color: #fff;
 }
 
 .ep-title {
-  font-weight: 650;
+  font-weight: 700;
   line-height: 1.35;
   word-break: break-word;
+  letter-spacing: -0.01em;
 }
 
 /* Channel affordances: cover + show name open the channel's episode list.
@@ -467,7 +505,7 @@ main > section > .card:not(.card--fill) {
   border: 0;
   background: transparent;
   display: block;
-  border-radius: 10px;
+  border-radius: var(--cover-radius);
   line-height: 0;
   cursor: pointer;
 }
@@ -480,7 +518,7 @@ main > section > .card:not(.card--fill) {
   background: transparent;
   font: inherit;
   font-size: inherit;
-  color: inherit;
+  color: var(--muted-soft);
   text-align: left;
   cursor: pointer;
 }
@@ -494,24 +532,69 @@ main > section > .card:not(.card--fill) {
   background: transparent;
   border: 0;
   font: inherit;
-  font-weight: 650;
+  font-weight: 700;
+  letter-spacing: -0.01em;
   color: inherit;
-  display: block;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
   width: 100%;
+  line-height: 1.35;
+  max-height: calc(1.35em * 2);
 }
 .ep-title--tap:hover { color: var(--brand); }
+
+/* Queue cards: fixed footprint — title/meta never grow the row. */
+.q-row {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(var(--cover-size) + var(--row-pad) * 2 + var(--action-size) + 10px);
+}
+.q-row .ep-head {
+  flex: 1 1 auto;
+  min-height: var(--cover-size);
+}
+.q-row .ep-title--tap {
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+.q-row .meta-line {
+  flex-wrap: nowrap;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.q-row .meta-line > * {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.q-row .meta-line [data-prog-slot],
+.q-row .meta-line [data-now-badge] {
+  flex: 0 0 auto;
+}
+.q-row .actions-row {
+  margin-top: auto;
+  padding-top: 10px;
+}
 
 .meta-line {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px 10px;
-  margin-top: 5px;
-  font-size: 0.76rem;
-  color: var(--muted);
+  margin-top: 6px;
+  font-size: 0.74rem;
+  color: var(--muted-soft);
   line-height: 1.4;
 }
-.meta-line .dot { opacity: 0.5; }
+.meta-line .dot { opacity: 0.45; }
+.meta-line > span.hide-sm { color: var(--muted-soft); opacity: 0.9; }
 
 .now-badge {
   display: inline-block;
@@ -535,42 +618,49 @@ main > section > .card:not(.card--fill) {
 }
 .badge--warn { background: color-mix(in srgb, var(--warn) 16%, Canvas); color: var(--warn); }
 
-/* progress badge (fig 2 / 3) */
+/* Duration soft capsule — lifted out of gray meta (Moon FM feel). */
 .prog-badge {
   display: inline-flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  padding: 4px 10px 6px;
-  border-radius: 10px;
-  border: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
-  background: color-mix(in srgb, CanvasText 3%, Canvas);
+  gap: 3px;
+  padding: 4px 11px 5px;
+  border-radius: var(--radius-pill);
+  border: 0;
+  background: var(--chip-cool);
   vertical-align: middle;
 }
-.prog-badge.done { flex-direction: row; gap: 6px; padding: 4px 10px; }
+.prog-badge.done {
+  flex-direction: row;
+  gap: 5px;
+  padding: 4px 10px;
+  background: var(--brand-soft);
+}
 .prog-badge .t {
-  font-size: 0.75rem;
-  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 650;
+  color: var(--chip-cool-ink);
   font-variant-numeric: tabular-nums;
   line-height: 1;
 }
+.prog-badge.done .t { color: var(--brand); }
 .prog-badge .bar {
-  width: 56px;
-  height: 3px;
+  width: 48px;
+  height: 2px;
   border-radius: var(--radius-pill);
-  background: color-mix(in srgb, CanvasText 14%, transparent);
+  background: color-mix(in srgb, var(--chip-cool-ink) 22%, transparent);
   overflow: hidden;
 }
 .prog-badge .bar > i {
   display: block;
   height: 100%;
   width: calc(var(--p, 0) * 1%);
-  background: var(--play);
+  background: var(--brand);
   border-radius: inherit;
 }
 .prog-badge .prog-check {
-  width: 15px; height: 15px;
-  color: color-mix(in srgb, CanvasText 45%, transparent);
+  width: 14px; height: 14px;
+  color: var(--brand);
 }
 
 .actions-row {
@@ -580,22 +670,44 @@ main > section > .card:not(.card--fill) {
   align-items: center;
   margin-top: 10px;
 }
-.actions-row .icon-btn { width: 34px; height: 34px; border-radius: 9px; }
-
-/* Secondary row actions are outlined, not filled: only play keeps a fill. */
-.actions-row .icon-btn:not(.icon-btn--primary) {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--muted);
+.actions-row .icon-btn {
+  width: var(--action-size);
+  height: var(--action-size);
+  border-radius: var(--action-radius);
+  border: 0;
 }
-.actions-row .icon-btn:not(.icon-btn--primary):hover {
+
+/* Soft-fill action language: play / queue / fav; more stays neutral. */
+.actions-row .icon-btn--play {
+  background: var(--brand-soft);
+  color: var(--brand);
+}
+.actions-row .icon-btn--play:hover {
+  background: color-mix(in srgb, var(--brand) 18%, Canvas);
+  color: var(--brand-strong);
+}
+.actions-row [data-act="queue"],
+.actions-row [data-act="fav"]:not([aria-pressed="true"]) {
   background: var(--surface-3);
   color: var(--text);
 }
-.actions-row .icon-btn--star[aria-pressed="true"] {
+.actions-row [data-act="queue"]:hover,
+.actions-row [data-act="fav"]:not([aria-pressed="true"]):hover {
+  background: color-mix(in srgb, CanvasText 12%, Canvas);
+}
+.actions-row .icon-btn--star[aria-pressed="true"],
+.actions-row [data-act="fav"][aria-pressed="true"] {
   background: var(--brand-soft);
-  border-color: transparent;
   color: var(--brand);
+}
+.actions-row .more-wrap > .icon-btn,
+.actions-row .icon-btn:not(.icon-btn--play):not([data-act="queue"]):not([data-act="fav"]) {
+  background: var(--surface-3);
+  color: var(--muted);
+}
+.actions-row .more-wrap > .icon-btn:hover {
+  background: color-mix(in srgb, CanvasText 12%, Canvas);
+  color: var(--text);
 }
 
 /* ---------- more menu (popover) ---------- */
@@ -655,9 +767,14 @@ main > section > .card:not(.card--fill) {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: var(--space-4);
+  box-shadow: var(--shadow-1);
 }
 .queue-sheet__grab { display: none; }
 .queue-list-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.queue-list-wrap .q-list {
+  flex: 1;
+  min-height: 0;
+}
 
 .drag-handle {
   display: grid; place-items: center;
@@ -919,8 +1036,8 @@ main > section > .card:not(.card--fill) {
 .player.is-empty { opacity: 0.85; }
 .player__cover {
   position: relative;
-  width: 48px; height: 48px;
-  border-radius: 10px;
+  width: 44px; height: 44px;
+  border-radius: 11px;
   object-fit: cover;
   background: var(--surface-3);
   overflow: hidden;
@@ -939,16 +1056,17 @@ main > section > .card:not(.card--fill) {
 }
 .player__meta:hover { background: transparent; }
 .player__title {
-  font-weight: 650;
+  font-weight: 700;
   font-size: 0.92rem;
+  letter-spacing: -0.01em;
   line-height: 1.2;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .player__sub {
-  font-size: 0.74rem;
-  color: var(--muted);
+  font-size: 0.72rem;
+  color: var(--muted-soft);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -960,16 +1078,60 @@ main > section > .card:not(.card--fill) {
   display: flex;
   justify-content: space-between;
   gap: 8px;
-  font-size: 0.68rem;
-  color: var(--muted);
+  font-size: 0.66rem;
+  color: var(--muted-soft);
   font-variant-numeric: tabular-nums;
   line-height: 1.2;
-  margin-bottom: 1px;
+  margin-bottom: 2px;
 }
-.player__range { width: 100%; height: 4px; accent-color: var(--brand); margin: 0; }
+.player__range {
+  width: 100%;
+  height: 2px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--brand);
+  background: transparent;
+  cursor: pointer;
+}
+.player__range::-webkit-slider-runnable-track {
+  height: 2px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, CanvasText 14%, transparent);
+}
+.player__range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: var(--brand);
+  border: 0;
+  box-shadow: var(--shadow-1);
+}
+.player__range::-moz-range-track {
+  height: 2px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, CanvasText 14%, transparent);
+}
+.player__range::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--brand);
+  border: 0;
+}
 .player__controls { display: flex; gap: 6px; align-items: center; }
 .player__controls .icon-btn { width: 36px; height: 36px; border-radius: 10px; }
-.player__controls .icon-btn--primary { width: 44px; height: 44px; border-radius: 50%; }
+/* Bottom bar: only the main transport stays solid brand. */
+.player__controls .icon-btn--primary {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--brand);
+  color: #fff;
+}
+.player__controls .icon-btn--primary:hover { background: var(--brand-strong); }
 
 /* thin progress line used on compact mobile bar */
 .player__line {
@@ -1196,15 +1358,20 @@ main > section > .card:not(.card--fill) {
   .card { padding: 12px; border-radius: var(--radius); }
 
   /* rows: smaller cover, fewer visible actions */
-  .ep-head, .fav-head, .ep-head.q-head { grid-template-columns: 44px minmax(0, 1fr); }
-  .ep-head.q-head { grid-template-columns: 18px 44px minmax(0, 1fr); }
-  .ep-cover, .cover-ph { width: 44px; height: 44px; border-radius: 9px; }
-  .ep-row, .q-row, .fav-row { padding: 10px; }
+  :root {
+    --cover-size: 48px;
+    --cover-radius: 11px;
+    --row-pad: 12px;
+    --row-gap: 8px;
+    --action-size: 34px;
+  }
+  .ep-head, .fav-head, .ep-head.q-head { grid-template-columns: var(--cover-size) minmax(0, 1fr); }
+  .ep-head.q-head { grid-template-columns: 18px var(--cover-size) minmax(0, 1fr); }
+  .ep-list, .q-list, .fav-list { padding: 8px; }
   .actions-row { gap: 6px; margin-top: 8px; }
-  .actions-row .icon-btn { width: 38px; height: 38px; }
   .meta-line .hide-sm { display: none; }
-  .prog-badge { padding: 3px 8px 5px; }
-  .prog-badge .bar { width: 46px; }
+  .prog-badge { padding: 3px 9px 4px; }
+  .prog-badge .bar { width: 42px; }
 
   /* queue as bottom sheet */
   .queue-panel {

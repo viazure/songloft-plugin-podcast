@@ -191,7 +191,7 @@ describe("history batch delete", () => {
     ]);
     expect(n).toBe(1);
     expect(await lookupSongMapping(1)).toBeNull();
-    expect(await lookupSongMapping(2)?.guid).toBe("y");
+    expect((await lookupSongMapping(2))?.guid).toBe("y");
   });
 });
 
@@ -234,7 +234,7 @@ describe("play events (P1)", () => {
     const list = await loadHistory();
     expect(list).toHaveLength(1);
     expect(list[0]).toMatchObject({ guid: "ep-99", title: "Ep" });
-    expect(await lookupSongMapping(99)?.guid).toBe("ep-99");
+    expect((await lookupSongMapping(99))?.guid).toBe("ep-99");
   });
 
   it("marks completed on finish", async () => {

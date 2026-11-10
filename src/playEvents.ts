@@ -28,8 +28,10 @@ let lastSongId: number | null = null;
 let subscribed = false;
 
 function dedupe(key: DedupeKey, now: number): boolean {
-  const prev = recent.get(key) || 0;
-  if (now - prev < DEDUPE_MS) return true;
+  // Missing key must not fall back to 0 — host/test timestamps near epoch
+  // (e.g. 1000) would otherwise be treated as duplicates of a fake "t=0".
+  const prev = recent.get(key);
+  if (prev !== undefined && now - prev < DEDUPE_MS) return true;
   recent.set(key, now);
   if (recent.size > 80) {
     for (const [k, at] of recent) {

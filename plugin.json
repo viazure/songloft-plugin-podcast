@@ -4,6 +4,7 @@
   "version": "0.4.0",
   "description": "订阅公开播客 RSS；固定歌单「播客」为播放列表；按需入库，经 /api/music/url 解析后由宿主播放；支持一键投放到小爱音箱",
   "author": "viazure",
+  "homepage": "https://github.com/viazure/songloft-plugin-podcast",
   "license": "Apache-2.0",
   "entryPath": "podcast",
   "main": "main.jsc",
@@ -16,7 +17,9 @@
     "playlists.write",
     "inter-plugin"
   ],
+  "updateUrl": "https://raw.githubusercontent.com/viazure/songloft-plugin-podcast/main/plugin.json",
+  "download_url": "https://github.com/viazure/songloft-plugin-podcast/releases/download/v0.4.0/podcast.jsplugin.zip",
   "icon": "icon.png",
-  "entryHash": "6cb7933d7d59d794798400ffc68d5a36c80994f33312355932c0130fc6f2fb30",
-  "zipHash": "4cb570c54ef263ee50a558ed580143c24316f320d0994dbd9416c43545552607"
+  "entryHash": "e4e293e46a4eba1c0429fd82eab94bdd20a0bde8dd00166d2b7024b914d51e3b",
+  "zipHash": "0c9fcf007aebde5a281fafc34110cf3ec6f7c7664be9361263fee437aae4262f"
 }
