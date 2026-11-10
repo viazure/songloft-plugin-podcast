@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/songloft-org/plugin-toolchain/main/schemas/plugin.schema.json",
   "name": "播客",
   "version": "0.4.0",
-  "description": "订阅公开播客 RSS；固定歌单「播客」为播放列表；按需入库，经 /api/music/url 解析后由宿主播放；支持一键投放到小爱音箱",
+  "description": "泛用型播客：订阅公开 RSS，本机进度与收听历史；固定歌单「播客」播放；支持投放到小爱音箱",
   "author": "viazure",
   "homepage": "https://github.com/viazure/songloft-plugin-podcast",
   "license": "Apache-2.0",
