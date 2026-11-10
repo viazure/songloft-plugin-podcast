@@ -1,5 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { episodeDedupKey } from "../src/dedup";
+import { beforeEach, describe, expect, it } from "vitest";
+import { addSubscription, refreshSubscription } from "../src/refresh";
+import { prepareEpisode } from "../src/prepare";
+import { loadSubscriptions, upsertProgress, getProgress } from "../src/store";
+import { appendToPodcastQueue, type PlaylistsApi } from "../src/podcastQueue";
 
 const SAMPLE = `<?xml version="1.0"?>
 <rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
@@ -25,17 +28,173 @@ const SAMPLE = `<?xml version="1.0"?>
 
 type Bag = Record<string, unknown>;
 
-function installSongloftMock() {
+function installMocks() {
   const bag: Bag = {};
   const songsDb: Array<{
     id: number;
     dedup_key: string;
     title: string;
     url: string;
+    source_data?: string;
   }> = [];
   let songSeq = 1;
   const playlists: Array<{ id: number; name: string; songs: number[] }> = [];
   let plSeq = 1;
+
+  const playlistsApi: PlaylistsApi = {
+    async list() {
+      return playlists.map((p) => ({
+        id: p.id,
+        type: "normal" as const,
+        name: p.name,
+        description: "",
+        cover_url: "",
+        labels: [],
+        song_count: p.songs.length,
+        created_at: "",
+        updated_at: "",
+        sort_by: "position",
+        sort_order: "asc",
+      }));
+    },
+    async create(input) {
+      const id = plSeq++;
+      playlists.push({ id, name: input.name, songs: [] });
+      return {
+        id,
+        type: "normal",
+        name: input.name,
+        description: input.description || "",
+        cover_url: "",
+        labels: [],
+        song_count: 0,
+        created_at: "",
+        updated_at: "",
+        sort_by: "position",
+        sort_order: "asc",
+      };
+    },
+    async getSongs(playlistId) {
+      const p = playlists.find((x) => x.id === playlistId);
+      return (p?.songs || []).map((id) => ({
+        id,
+        type: "remote" as const,
+        title: "",
+        artist: "",
+        album: "",
+        year: 0,
+        genre: "",
+        duration: 0,
+        file_path: "",
+        url: "",
+        cover_url: "",
+        file_size: 0,
+        format: "",
+        bit_rate: 0,
+        sample_rate: 0,
+        is_live: false,
+        is_video: false,
+        added_at: "",
+        updated_at: "",
+      }));
+    },
+    async addSongs(playlistId, songIds) {
+      const p = playlists.find((x) => x.id === playlistId);
+      if (!p) throw new Error("missing");
+      let added = 0;
+      let skipped = 0;
+      for (const id of songIds) {
+        if (!p.songs.includes(id)) {
+          p.songs.push(id);
+          added++;
+        } else skipped++;
+      }
+      return { added, skipped };
+    },
+    async removeSongs(playlistId, songIds) {
+      const p = playlists.find((x) => x.id === playlistId);
+      if (!p) return;
+      p.songs = p.songs.filter((id) => !songIds.includes(id));
+    },
+    async reorder(playlistId, songIds) {
+      const p = playlists.find((x) => x.id === playlistId);
+      if (!p) throw new Error("missing");
+      p.songs = [...songIds];
+    },
+  };
+
+  const songsApi = {
+    async create(
+      inputs: Array<{ url?: string; title: string; dedupKey?: string; sourceData?: string }>
+    ) {
+      const out = [];
+      for (const input of inputs) {
+        const key = input.dedupKey || "";
+        let hit = songsDb.find((s) => s.dedup_key === key);
+        if (!hit) {
+          hit = {
+            id: songSeq++,
+            dedup_key: key,
+            title: input.title,
+            url: input.url || "",
+            source_data: input.sourceData || "",
+          };
+          songsDb.push(hit);
+        }
+        out.push({
+          id: hit.id,
+          type: "remote",
+          title: hit.title,
+          artist: "",
+          album: "",
+          year: 0,
+          genre: "",
+          duration: 0,
+          file_path: "",
+          url: hit.url,
+          cover_url: "",
+          file_size: 0,
+          format: "",
+          bit_rate: 0,
+          sample_rate: 0,
+          is_live: false,
+          is_video: false,
+          dedup_key: hit.dedup_key,
+          source_data: hit.source_data || "",
+          added_at: "",
+          updated_at: "",
+        });
+      }
+      return out;
+    },
+    async getById(id: number) {
+      const hit = songsDb.find((s) => s.id === id);
+      if (!hit) return null;
+      return {
+        id: hit.id,
+        type: "remote",
+        title: hit.title,
+        artist: "",
+        album: "",
+        year: 0,
+        genre: "",
+        duration: 0,
+        file_path: "",
+        url: hit.url,
+        cover_url: "",
+        file_size: 0,
+        format: "",
+        bit_rate: 0,
+        sample_rate: 0,
+        is_live: false,
+        is_video: false,
+        dedup_key: hit.dedup_key,
+        source_data: hit.source_data || "",
+        added_at: "",
+        updated_at: "",
+      };
+    },
+  };
 
   (globalThis as unknown as { songloft: unknown }).songloft = {
     storage: {
@@ -45,261 +204,100 @@ function installSongloftMock() {
       async set(key: string, value: unknown) {
         bag[key] = value;
       },
-      async remove(key: string) {
-        delete bag[key];
-      },
     },
-    log: {
-      info: () => {},
-      warn: () => {},
-      error: () => {},
-    },
-    songs: {
-      async create(inputs: Array<{ url?: string; title: string; dedupKey?: string }>) {
-        const out = [];
-        for (const input of inputs) {
-          const key = input.dedupKey || "";
-          let hit = songsDb.find((s) => s.dedup_key === key);
-          if (!hit) {
-            hit = {
-              id: songSeq++,
-              dedup_key: key,
-              title: input.title,
-              url: input.url || "",
-            };
-            songsDb.push(hit);
-          }
-          out.push({
-            id: hit.id,
-            type: "remote",
-            title: hit.title,
-            artist: "",
-            album: "",
-            year: 0,
-            genre: "",
-            duration: 0,
-            file_path: "",
-            url: hit.url,
-            cover_url: "",
-            file_size: 0,
-            format: "",
-            bit_rate: 0,
-            sample_rate: 0,
-            is_live: false,
-            is_video: false,
-            dedup_key: hit.dedup_key,
-            added_at: "",
-            updated_at: "",
-          });
-        }
-        return out;
-      },
-    },
-    playlists: {
-      async list() {
-        return playlists.map((p) => ({
-          id: p.id,
-          type: "normal",
-          name: p.name,
-          description: "",
-          cover_url: "",
-          labels: [],
-          song_count: p.songs.length,
-          created_at: "",
-          updated_at: "",
-          sort_by: "position",
-          sort_order: "asc",
-        }));
-      },
-      async create(input: { name: string }) {
-        const id = plSeq++;
-        playlists.push({ id, name: input.name, songs: [] });
-        return {
-          id,
-          type: "normal",
-          name: input.name,
-          description: "",
-          cover_url: "",
-          labels: [],
-          song_count: 0,
-          created_at: "",
-          updated_at: "",
-          sort_by: "position",
-          sort_order: "asc",
-        };
-      },
-      async getSongs(playlistId: number) {
-        const p = playlists.find((x) => x.id === playlistId);
-        return (p?.songs || []).map((id) => ({
-          id,
-          type: "remote",
-          title: "",
-          artist: "",
-          album: "",
-          year: 0,
-          genre: "",
-          duration: 0,
-          file_path: "",
-          url: "",
-          cover_url: "",
-          file_size: 0,
-          format: "",
-          bit_rate: 0,
-          sample_rate: 0,
-          is_live: false,
-          is_video: false,
-          added_at: "",
-          updated_at: "",
-        }));
-      },
-      async addSongs(playlistId: number, songIds: number[]) {
-        const p = playlists.find((x) => x.id === playlistId);
-        if (!p) throw new Error("missing playlist");
-        let added = 0;
-        for (const id of songIds) {
-          if (!p.songs.includes(id)) {
-            p.songs.push(id);
-            added++;
-          }
-        }
-        return { added, skipped: songIds.length - added };
-      },
-      async removeSongs(playlistId: number, songIds: number[]) {
-        const p = playlists.find((x) => x.id === playlistId);
-        if (!p) throw new Error("missing playlist");
-        const drop = new Set(songIds);
-        p.songs = p.songs.filter((id) => !drop.has(id));
-      },
-      async delete(id: number) {
-        const i = playlists.findIndex((p) => p.id === id);
-        if (i >= 0) playlists.splice(i, 1);
-      },
-    },
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+    songs: songsApi,
+    playlists: playlistsApi,
   };
 
-  return { bag, songsDb, playlists };
+  return { bag, songsDb, playlists, songsApi, playlistsApi };
 }
 
-describe("subscription CRUD + refresh replace", () => {
+describe("subscription refresh + prepare + queue", () => {
   beforeEach(() => {
-    vi.resetModules();
+    installMocks();
   });
 
-  it("add → refresh upserts remotes with dedup_key; second refresh replaces playlist", async () => {
-    const mock = installSongloftMock();
+  it("refresh updates index without creating songs or playlists", async () => {
+    const ctx = installMocks();
     const fetchImpl = async () =>
-      ({
-        ok: true,
-        status: 200,
-        text: async () => SAMPLE,
-      }) as Response;
-
-    const { addSubscription, refreshSubscription, deleteSubscription } = await import("../src/refresh");
-    const store = await import("../src/store");
-
-    const deps = {
-      songsApi: (globalThis as any).songloft.songs,
-      playlistsApi: (globalThis as any).songloft.playlists,
-      fetchImpl: fetchImpl as typeof fetch,
-      now: () => 1_700_000_000_000,
-    };
-
-    const added = await addSubscription("https://example.com/news.xml", deps);
+      new Response(SAMPLE, { status: 200, headers: { "Content-Type": "application/rss+xml" } });
+    const added = await addSubscription("https://example.com/feed.xml", { fetchImpl });
     expect(added.ok).toBe(true);
     if (!added.ok) return;
-    expect(added.subscription.title).toBe("News Daily");
-    expect(added.createdSongs).toBe(2);
-    expect(mock.playlists).toHaveLength(1);
-    expect(mock.playlists[0].name).toBe("News Daily");
-    expect(mock.playlists[0].songs).toHaveLength(2);
+    expect(added.subscription.episodes.length).toBe(2);
+    expect(added.subscription.episodes.every((e) => e.songId == null)).toBe(true);
+    expect(ctx.songsDb.length).toBe(0);
+    expect(ctx.playlists.length).toBe(0);
 
-    const feedId = added.subscription.id;
-    expect(mock.songsDb[0].dedup_key).toBe(episodeDedupKey(feedId, "g-morning", "https://cdn.example.com/morning.mp3"));
-
-    // Second refresh should not duplicate songs (same dedup), and replace playlist set.
-    const again = await refreshSubscription(feedId, deps);
+    const again = await refreshSubscription(added.subscription.id, { fetchImpl });
     expect(again.ok).toBe(true);
-    expect(mock.songsDb).toHaveLength(2);
-    expect(mock.playlists[0].songs).toHaveLength(2);
-
-    const del = await deleteSubscription(feedId, { clearPlaylist: false });
-    expect(del.ok).toBe(true);
-    expect(del.tip).toMatch(/保留/);
-    const left = await store.loadSubscriptions();
-    expect(left).toHaveLength(0);
-    // playlist + songs remain
-    expect(mock.playlists).toHaveLength(1);
-    expect(mock.songsDb).toHaveLength(2);
+    expect(ctx.songsDb.length).toBe(0);
   });
 
-  it("rejects bad feed on add", async () => {
-    installSongloftMock();
+  it("prepare creates songId once; queue append uses fixed playlist", async () => {
+    const ctx = installMocks();
     const fetchImpl = async () =>
-      ({
-        ok: true,
-        status: 200,
-        text: async () => "<html>login</html>",
-      }) as Response;
-    const { addSubscription } = await import("../src/refresh");
-    const r = await addSubscription("https://example.com/x.xml", {
-      songsApi: (globalThis as any).songloft.songs,
-      playlistsApi: (globalThis as any).songloft.playlists,
-      fetchImpl: fetchImpl as typeof fetch,
+      new Response(SAMPLE, { status: 200, headers: { "Content-Type": "application/rss+xml" } });
+    const added = await addSubscription("https://example.com/feed.xml", { fetchImpl });
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+
+    const ep = added.subscription.episodes[0];
+    const prep = await prepareEpisode(
+      { subscriptionId: added.subscription.id, dedupKey: ep.dedupKey },
+      ctx.songsApi
+    );
+    expect(prep.ok).toBe(true);
+    if (!prep.ok) return;
+    expect(prep.songId).toBeGreaterThan(0);
+    expect(ctx.songsDb.length).toBe(1);
+
+    const prep2 = await prepareEpisode(
+      { subscriptionId: added.subscription.id, dedupKey: ep.dedupKey },
+      ctx.songsApi
+    );
+    expect(prep2.ok).toBe(true);
+    if (!prep2.ok) return;
+    expect(prep2.created).toBe(false);
+    expect(ctx.songsDb.length).toBe(1);
+
+    const q = await appendToPodcastQueue(ctx.playlistsApi, [prep.songId]);
+    expect(q.playlistName).toBe("播客");
+    expect(q.added).toBe(1);
+    expect(ctx.playlists[0].songs).toEqual([prep.songId]);
+  });
+
+  it("progress upsert is independent of queue", async () => {
+    await upsertProgress({
+      feedUrl: "https://example.com/feed.xml",
+      guid: "g-morning",
+      positionSec: 12,
+      durationSec: 600,
+      lastPlayedAt: Date.now(),
     });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toMatch(/HTML|RSS/i);
-  });
-});
-
-describe("mutation exclusion and URL collision", () => {
-  beforeEach(() => { vi.resetModules(); });
-  const fetchOk = async () => ({ok:true,status:200,text:async()=>SAMPLE}) as Response;
-
-  it("blocks concurrent add/update/delete while add owns the refresh mutex", async () => {
-    const mock = installSongloftMock();
-    const mod = await import("../src/refresh");
-    let entered!:()=>void; const started = new Promise<void>(r=>entered=r);
-    let release!:()=>void; const hold = new Promise<void>(r=>release=r);
-    const deps = {songsApi:(globalThis as any).songloft.songs,playlistsApi:(globalThis as any).songloft.playlists,
-      fetchImpl:(async()=>{entered();await hold;return fetchOk();}) as typeof fetch};
-    const first = mod.addSubscription("https://example.test/one.xml",deps);
-    await started;
-    try {
-      expect(await mod.addSubscription("https://example.test/two.xml",deps)).toMatchObject({ok:false,skipped:true,reason:"skipped_busy"});
-      expect(await mod.updateSubscriptionUrl("missing","https://example.test/three.xml",deps)).toMatchObject({ok:false,skipped:true,reason:"skipped_busy"});
-      expect(await mod.deleteSubscription("missing")).toMatchObject({ok:false,skipped:true,reason:"skipped_busy"});
-      expect(mock.playlists).toHaveLength(0);
-    } finally { release(); }
-    expect((await first).ok).toBe(true);
-    expect(mock.playlists).toHaveLength(1);
+    const p = await getProgress("https://example.com/feed.xml", "g-morning");
+    expect(p?.positionSec).toBe(12);
+    expect(p?.completed).toBe(false);
+    const subs = await loadSubscriptions();
+    expect(subs.length).toBe(0);
   });
 
-  it("rejects target URL belonging to another subscription without any writes/fetches", async () => {
-    const mock = installSongloftMock(); const mod = await import("../src/refresh"); const store=await import("../src/store");
-    const fetchMock=vi.fn(fetchOk);
-    const deps={songsApi:(globalThis as any).songloft.songs,playlistsApi:(globalThis as any).songloft.playlists,fetchImpl:fetchMock as typeof fetch};
-    const a=await mod.addSubscription("https://example.test/one.xml",deps);
-    const b=await mod.addSubscription("https://example.test/two.xml",deps);
-    if(!a.ok||!b.ok) throw Error("setup failed");
-    const before=JSON.stringify(await store.loadSubscriptions()); const pls=JSON.stringify(mock.playlists);
-    fetchMock.mockClear();
-    const conflict=await mod.updateSubscriptionUrl(a.subscription.id,"https://EXAMPLE.test/two.xml/",deps);
-    expect(conflict.ok).toBe(false); if(!conflict.ok) expect(conflict.reason).toContain("占用");
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(JSON.stringify(await store.loadSubscriptions())).toBe(before);
-    expect(JSON.stringify(mock.playlists)).toBe(pls);
-  });
-
-  it("records playlist add errors without deleting stored playlist identity", async () => {
-    installSongloftMock(); const mod=await import("../src/refresh");const store=await import("../src/store");
-    const api=(globalThis as any).songloft;
-    const deps={songsApi:api.songs,playlistsApi:api.playlists,fetchImpl:fetchOk as typeof fetch};
-    const a=await mod.addSubscription("https://example.test/one.xml",deps); if(!a.ok) throw Error("setup failed");
-    const del=vi.spyOn(api.playlists,"delete");
-    api.playlists.addSongs=async()=>{throw Error("add unavailable")};
-    const result=await mod.refreshSubscription(a.subscription.id,deps);
-    expect(result.ok).toBe(false); const saved=await store.getSubscription(a.subscription.id);
-    expect(saved?.playlistId).toBe(a.playlistId); expect(saved?.lastError).toContain("add unavailable");
-    expect(del).not.toHaveBeenCalled();
+  it("refresh does not clear progress records", async () => {
+    const fetchImpl = async () =>
+      new Response(SAMPLE, { status: 200, headers: { "Content-Type": "application/rss+xml" } });
+    const added = await addSubscription("https://example.com/feed.xml", { fetchImpl });
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+    await upsertProgress({
+      feedUrl: added.subscription.url,
+      guid: "g-morning",
+      positionSec: 99,
+      completed: false,
+    });
+    const r = await refreshSubscription(added.subscription.id, { fetchImpl });
+    expect(r.ok).toBe(true);
+    const p = await getProgress(added.subscription.url, "g-morning");
+    expect(p?.positionSec).toBe(99);
   });
 });

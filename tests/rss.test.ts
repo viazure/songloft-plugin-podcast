@@ -117,7 +117,8 @@ describe("CDATA regression (synthetic fixtures only)", () => {
     expect(r.channel.title).toBe("测试频道 & 杂谈");
     expect(r.channel.author).toBe("测试作者");
     expect(r.channel.description).toBe("频道介绍");
-    expect(r.channel.episodes[0]).toMatchObject({title:"中文剧集 😀",guid:"episode-1",description:"剧集介绍",durationSec:3723});
+    expect(r.channel.episodes[0]).toMatchObject({title:"中文剧集 😀",guid:"episode-1",durationSec:3723});
+    expect(r.channel.episodes[0].description).toContain("剧集介绍");
   });
 
   it("preserves escaped angle brackets as literal text", () => {

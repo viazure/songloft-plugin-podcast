@@ -121,14 +121,13 @@ async function importOpmlUnlocked(opmlText: string, nowMs: number): Promise<Opml
         title,
         author: null,
         coverUrl: null,
-        playlistId: null,
-        playlistName: null,
         createdAt: nowMs,
         updatedAt: nowMs,
         lastSuccessAt: null,
         lastError: null,
         lastSkippedNonAudio: 0,
         episodeCount: 0,
+        truncated: false,
         episodes: [],
       };
       list = await upsertSubscription(stub);

@@ -3,6 +3,9 @@ dist/
 *.log
 .env
 .env.*
+
+# NOTE: static/js/app.js is generated from ui/ by `npm run build` (prebuild).
+# It is intentionally committed so `songloft-plugin build` works without npm hooks.
 !.env.example
 
 local.config.json

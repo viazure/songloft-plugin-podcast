@@ -93,6 +93,191 @@ function textField(block: string, names: string[]): string | null {
   return null;
 }
 
+const SHOW_NOTE_ALLOWED = new Set([
+  "p",
+  "br",
+  "a",
+  "img",
+  "strong",
+  "b",
+  "em",
+  "i",
+  "u",
+  "s",
+  "ul",
+  "ol",
+  "li",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "blockquote",
+  "code",
+  "pre",
+  "hr",
+  "span",
+  "div",
+  "table",
+  "thead",
+  "tbody",
+  "tr",
+  "th",
+  "td",
+]);
+
+const SHOW_NOTE_VOID = new Set(["br", "hr", "img"]);
+const SHOW_NOTE_DROPPED_WITH_CONTENT = [
+  "script",
+  "style",
+  "iframe",
+  "object",
+  "embed",
+  "template",
+  "svg",
+  "math",
+];
+
+/** Only absolute http(s) urls may appear in `href` / `src`. */
+export function isSafeShowNoteUrl(value: string | null | undefined): boolean {
+  const raw = String(value == null ? "" : value).trim();
+  if (!raw) return false;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw) && !/^https?:/i.test(raw)) return false;
+  if (!/^https?:\/\/[^\s]+/i.test(raw)) return false;
+  if (/[\u0000-\u001f\u007f"'<>`\\]/.test(raw)) return false;
+  return true;
+}
+
+function escapeShowNoteText(value: string): string {
+  return String(value).replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function escapeShowNoteAttr(value: string): string {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function readShowNoteAttr(attrs: string, name: string): string {
+  const re = new RegExp(`\\b${name}\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s"'>]+))`, "gi");
+  let out = "";
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(attrs)) !== null) {
+    out = m[2] != null ? m[2] : m[3] != null ? m[3] : m[4] || "";
+  }
+  return out;
+}
+
+/**
+ * Keep a small allowlist so ShowNote can render images/links safely.
+ *
+ * Text is escaped and every attribute except `img[src|alt]` / `a[href]` is
+ * dropped, so stored ShowNote can never contain script, event handlers or
+ * `javascript:` urls even if a feed tries.
+ */
+export function sanitizeShowNoteHtml(raw: string): string {
+  let html = String(raw || "").replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, "$1");
+  html = html.replace(/<!--[\s\S]*?-->/g, "");
+  for (const tag of SHOW_NOTE_DROPPED_WITH_CONTENT) {
+    html = html.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?</${tag}\\s*>`, "gi"), "");
+    html = html.replace(new RegExp(`</?${tag}\\b[^>]*>`, "gi"), "");
+  }
+
+  const parts: Array<{ text?: string; closing?: boolean; name?: string; attrs?: string }> = [];
+  const tagRe = /<(\/?)([a-zA-Z][a-zA-Z0-9:-]*)((?:\s+(?:[^<>"']|"[^"]*"|'[^']*')*)?)(\/?)>/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = tagRe.exec(html)) !== null) {
+    if (m.index > last) parts.push({ text: html.slice(last, m.index) });
+    parts.push({ closing: m[1] === "/", name: m[2].toLowerCase(), attrs: m[3] || "" });
+    last = m.index + m[0].length;
+  }
+  if (last < html.length) parts.push({ text: html.slice(last) });
+
+  const out: string[] = [];
+  // Tracks the tag actually emitted for each open element so a degraded
+  // `<a>` → `<span>` also closes as `</span>`.
+  const stack: string[] = [];
+
+  for (const part of parts) {
+    if (part.text !== undefined) {
+      out.push(escapeShowNoteText(part.text));
+      continue;
+    }
+    const name = part.name as string;
+    if (!SHOW_NOTE_ALLOWED.has(name)) continue;
+
+    if (part.closing) {
+      if (SHOW_NOTE_VOID.has(name)) continue;
+      // Close the innermost element of this type, if we opened one.
+      const at = stack.lastIndexOf(name);
+      if (at < 0) continue;
+      const emitted = stack.splice(at, 1)[0];
+      out.push(`</${emitted}>`);
+      continue;
+    }
+
+    if (name === "br" || name === "hr") {
+      out.push(`<${name} />`);
+      continue;
+    }
+
+    if (name === "img") {
+      const src = readShowNoteAttr(part.attrs || "", "src");
+      if (!isSafeShowNoteUrl(src)) continue;
+      const alt = readShowNoteAttr(part.attrs || "", "alt");
+      out.push(`<img src="${escapeShowNoteAttr(src.trim())}" alt="${escapeShowNoteAttr(alt)}" loading="lazy" />`);
+      continue;
+    }
+
+    if (name === "a") {
+      const href = readShowNoteAttr(part.attrs || "", "href");
+      if (!isSafeShowNoteUrl(href)) {
+        // Keep the text, drop the link (and close with the matching span).
+        stack.push("span");
+        out.push("<span>");
+        continue;
+      }
+      stack.push("a");
+      out.push(`<a href="${escapeShowNoteAttr(href.trim())}" target="_blank" rel="noopener noreferrer nofollow">`);
+      continue;
+    }
+
+    stack.push(name);
+    out.push(`<${name}>`);
+  }
+
+  // Close anything the feed left open so the snippet cannot leak formatting.
+  while (stack.length) {
+    out.push(`</${stack.pop()}>`);
+  }
+
+  return out.join("").replace(/\s{2,}/g, " ").trim();
+}
+
+/**
+ * Prefer content:encoded; keep sanitized HTML (images/links) for modal ShowNote.
+ *
+ * `maxLen` mirrors `MAX_SHOW_NOTE_CHARS` in store.ts: the storage normaliser
+ * truncates to the same bound, so trimming here keeps what we persist.
+ */
+export function extractShowNote(itemXml: string, maxLen = 6000): string | null {
+  for (const name of ["content:encoded", "itunes:summary", "description", "summary", "content"]) {
+    const body = tagBody(itemXml, name);
+    if (body == null) continue;
+    const html = sanitizeShowNoteHtml(body);
+    const text = stripTags(html);
+    if (!text && !/<img\b/i.test(html)) continue;
+    if (html.length > maxLen) return html.slice(0, maxLen) + "…";
+    return html;
+  }
+  return null;
+}
+
 /** itunes:duration → seconds. Accepts HH:MM:SS / MM:SS / raw seconds. */
 export function parseDuration(raw: string | null | undefined): number | null {
   if (raw == null) return null;
@@ -235,7 +420,7 @@ function parseItem(itemXml: string, channelCover: string | null): {
   const pubDate = textField(itemXml, ["pubDate", "published", "updated"]);
   const durationRaw = textField(itemXml, ["itunes:duration"]);
   const cover = extractImage(itemXml) || channelCover;
-  const description = textField(itemXml, ["description", "summary", "content:encoded", "content"]);
+  const description = extractShowNote(itemXml);
   return {
     episode: {
       title,

@@ -2,124 +2,358 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#9536c8" />
   <title>播客</title>
-  <style>
-    :root { color-scheme: light dark; }
-    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; max-width: 780px; }
-    h1 { font-size: 1.3rem; margin: 0 0 4px; }
-    h2 { font-size: 1rem; margin: 0; font-weight: 650; }
-    .muted { opacity: .7; font-size: .9rem; }
-    .card { border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius: 12px; padding: 14px; margin: 12px 0; }
-    label { display: block; font-size: .85rem; margin: 10px 0 4px; }
-    input[type=text], input[type=url], input[type=number], select, textarea {
-      width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 8px;
-      border: 1px solid color-mix(in srgb, CanvasText 25%, transparent); background: Canvas; color: CanvasText;
-    }
-    textarea { min-height: 110px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .8rem; }
-    .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; align-items: center; }
-    button { padding: 8px 12px; border-radius: 8px; border: 0; cursor: pointer; background: #6b3fa0; color: #fff; }
-    button.secondary { background: color-mix(in srgb, CanvasText 14%, Canvas); color: CanvasText; }
-    button.danger { background: #b00020; color: #fff; }
-    button:disabled { opacity: .45; cursor: not-allowed; }
-    #flash { margin: 8px 0 0; font-size: .9rem; min-height: 1.2em; }
-    .ok { color: #0a7a32; } .warn { color: #a15c00; } .err { color: #b00020; }
-    .sub-list { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
-    .sub-row {
-      border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
-      border-radius: 10px; padding: 12px; background: color-mix(in srgb, CanvasText 4%, Canvas);
-    }
-    .sub-row h3 { margin: 0 0 4px; font-size: 1rem; }
-    .sub-meta { font-size: .82rem; opacity: .75; line-height: 1.45; }
-    .sub-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
-    .check { display: flex; align-items: flex-start; gap: 8px; margin-top: 10px; }
-    .check label { margin: 0; }
-    .ep-list { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow: auto; }
-    .ep-row {
-      font-size: .88rem; padding: 8px 10px; border-radius: 8px;
-      border: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
-    }
-    .ep-row .meta { font-size: .78rem; opacity: .7; }
-    .empty { opacity: .65; font-size: .9rem; padding: 8px 0; }
-    pre.log { white-space: pre-wrap; word-break: break-word; font-size: .78rem; max-height: 220px; overflow: auto; margin: 8px 0 0; }
-    .opml-summary { font-size: .9rem; margin-top: 8px; line-height: 1.5; }
-    .opml-list { margin-top: 8px; max-height: 260px; overflow: auto; font-size: .82rem; }
-    .opml-row { padding: 6px 8px; border-radius: 8px; border: 1px solid color-mix(in srgb, CanvasText 10%, transparent); margin-top: 6px; }
-    .tag { display: inline-block; font-size: .72rem; padding: 1px 6px; border-radius: 999px; margin-right: 6px;
-      background: color-mix(in srgb, CanvasText 12%, Canvas); }
-    .tag.new { background: color-mix(in srgb, #0a7a32 28%, Canvas); }
-    .tag.dup { background: color-mix(in srgb, #a15c00 28%, Canvas); }
-    .tag.bad { background: color-mix(in srgb, #b00020 28%, Canvas); }
-  </style>
+  <link id="pluginIcon" rel="icon" type="image/png" href="static/icon.png" />
+  <link rel="stylesheet" href="static/css/app.css" />
 </head>
 <body>
-  <h1>播客</h1>
-  <p class="muted">订阅公开 RSS → 剧集入库为远程曲 → 覆盖同步到「每订阅一张」歌单。在 Songloft 打开对应歌单即可播放（不直连音箱）。</p>
-  <div id="flash" class="muted"></div>
+  <header class="app-head">
+    <div class="app-head__title">
+      <span class="brand-mark" aria-hidden="true">
+        <span class="ico">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M4.9 19.1a10 10 0 1 1 14.2 0"></path>
+            <path d="M7.8 16.2a6 6 0 1 1 8.4 0"></path>
+            <circle cx="12" cy="12" r="2"></circle>
+            <path d="M12 14v7"></path>
+          </svg>
+        </span>
+      </span>
+      <h1>播客</h1>
+    </div>
+    <div class="toolbar">
+      <button type="button" class="icon-btn" id="btnToggleQueue" title="隐藏播放列表" aria-pressed="true" aria-controls="queuePanel">
+        <span data-icon="panelRightClose" data-size="17"></span>
+      </button>
+    </div>
+  </header>
 
-  <div class="card">
-    <h2>添加订阅</h2>
-    <label for="feedUrl">RSS URL</label>
-    <input id="feedUrl" type="url" placeholder="https://example.com/podcast.xml" />
-    <div class="row">
-      <button type="button" id="btnAdd">添加并拉取</button>
-      <button type="button" class="secondary" id="btnRefreshAll">刷新全部</button>
-      <button type="button" class="secondary" id="btnReload">刷新状态</button>
+  <nav class="nav" aria-label="主导航">
+    <button type="button" data-tab="recent" aria-current="page" title="Updates · 订阅频道新上架">
+      <span data-icon="clock" data-size="15"></span><span>更新</span>
+    </button>
+    <button type="button" data-tab="favorites">
+      <span data-icon="star" data-size="15"></span><span>收藏</span>
+    </button>
+    <button type="button" data-tab="history" title="收听记录">
+      <span data-icon="history" data-size="15"></span><span>历史</span>
+    </button>
+    <button type="button" data-tab="subs">
+      <span data-icon="rss" data-size="15"></span><span>订阅</span>
+    </button>
+    <button type="button" data-tab="settings">
+      <span data-icon="settings" data-size="15"></span><span>设置</span>
+    </button>
+  </nav>
+
+  <div class="layout" id="layout">
+    <main>
+      <!-- 更新（频道新上架；内部 tab id 仍为 recent） -->
+      <section id="tab-recent">
+        <div class="card card--fill">
+          <div class="card__head">
+            <div class="card__head-main">
+              <h2>最近更新</h2>
+            </div>
+            <div class="toolbar">
+              <button type="button" class="icon-btn" id="btnRecentRefresh" title="刷新订阅">
+                <span data-icon="rotateCcw" data-size="16"></span>
+              </button>
+              <button type="button" class="icon-btn" id="btnToggleQueueInline" title="隐藏播放列表" aria-pressed="true" aria-controls="queuePanel">
+                <span data-icon="listMusic" data-size="16"></span>
+              </button>
+            </div>
+          </div>
+          <div id="recentList" class="ep-list scroll-body">
+            <div class="empty">加载中…</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 历史 -->
+      <section id="tab-history" class="hidden">
+        <div class="card card--fill">
+          <div class="card__head">
+            <div class="card__head-main">
+              <h2>收听历史</h2>
+            </div>
+            <div class="toolbar">
+              <button type="button" class="icon-btn" id="btnHistorySelect" title="多选" aria-pressed="false">
+                <span data-icon="listChecks" data-size="16"></span>
+              </button>
+              <button type="button" class="icon-btn" id="btnClearHistory" title="清空历史">
+                <span data-icon="trash" data-size="16"></span>
+              </button>
+            </div>
+          </div>
+          <div class="history-tools">
+            <div class="search">
+              <span data-icon="search" data-size="15"></span>
+              <input id="historySearch" type="search" placeholder="搜索标题或节目" aria-label="搜索历史" />
+              <button type="button" class="search__clear hidden" id="historySearchClear" title="清除">
+                <span data-icon="x" data-size="14"></span>
+              </button>
+            </div>
+            <label class="switch-field" title="进度标记已听完，或距结尾 ≤3 秒">
+              <span class="switch-field__label">只看已听完</span>
+              <input type="checkbox" id="historyCompletedOnly" class="switch" role="switch" aria-checked="false" />
+            </label>
+          </div>
+          <div id="historySelectBar" class="row row--tight history-select-bar hidden">
+            <button type="button" class="btn btn--danger btn--sm" id="btnHistoryDeleteSelected" disabled>删除所选</button>
+            <button type="button" class="btn btn--ghost btn--sm" id="btnHistorySelectCancel">取消</button>
+            <span id="historySelectCount" class="muted"></span>
+          </div>
+          <div id="historyList" class="ep-list scroll-body">
+            <div class="empty">加载中…</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 收藏 -->
+      <section id="tab-favorites" class="hidden">
+        <div class="card card--fill">
+          <div class="card__head">
+            <div class="card__head-main">
+              <h2>收藏 · 单集</h2>
+            </div>
+            <div class="search">
+              <span data-icon="search" data-size="15"></span>
+              <input id="favSearch" type="search" placeholder="搜索标题或节目" aria-label="搜索收藏" />
+              <button type="button" class="search__clear hidden" id="favSearchClear" title="清除">
+                <span data-icon="x" data-size="14"></span>
+              </button>
+            </div>
+          </div>
+          <div id="favList" class="fav-list scroll-body">
+            <div class="empty">加载中…</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 订阅 -->
+      <section id="tab-subs" class="hidden">
+        <div class="card card--fill">
+          <div class="card__head">
+            <div class="card__head-main">
+              <h2>订阅</h2>
+            </div>
+            <div class="search">
+              <span data-icon="search" data-size="15"></span>
+              <input id="subSearch" type="search" placeholder="搜索频道或 URL" aria-label="搜索订阅" />
+              <button type="button" class="search__clear hidden" id="subSearchClear" title="清除">
+                <span data-icon="x" data-size="14"></span>
+              </button>
+            </div>
+            <div class="toolbar">
+              <button type="button" class="icon-btn" id="btnRefreshAll" title="刷新全部">
+                <span data-icon="rotateCcw" data-size="16"></span>
+              </button>
+              <button type="button" class="icon-btn" id="btnOpmlExport" title="导出 OPML">
+                <span data-icon="download" data-size="16"></span>
+              </button>
+              <button type="button" class="icon-btn" id="btnOpenAddSub" title="添加订阅">
+                <span data-icon="listPlus" data-size="16"></span>
+              </button>
+            </div>
+          </div>
+          <div id="subList" class="sub-grid scroll-body">
+            <div class="empty">加载中…</div>
+          </div>
+        </div>
+
+        <div class="card" id="addSubCard" hidden>
+          <div class="card__head">
+            <div class="card__head-main"><h2>添加订阅</h2></div>
+            <button type="button" class="icon-btn" id="btnCloseAddSub" title="收起">
+              <span data-icon="x" data-size="16"></span>
+            </button>
+          </div>
+          <label for="feedUrl">RSS URL</label>
+          <input id="feedUrl" type="url" placeholder="https://example.com/podcast.xml" />
+          <div class="row">
+            <button type="button" class="btn btn--primary" id="btnAdd">添加并拉取</button>
+          </div>
+
+          <details class="disclosure" style="margin-top:12px">
+            <summary><span data-icon="upload" data-size="15"></span>OPML 导入</summary>
+            <div class="disclosure__body">
+              <label for="opmlFile">上传 .opml</label>
+              <input id="opmlFile" type="file" accept=".opml,.xml,text/xml,application/xml" />
+              <label for="opmlText">或粘贴 OPML</label>
+              <textarea id="opmlText" placeholder="&lt;opml version=&quot;2.0&quot;&gt;…"></textarea>
+              <div class="row">
+                <button type="button" class="btn btn--primary" id="btnOpmlPreview">预览</button>
+                <button type="button" class="btn btn--tonal" id="btnOpmlImport" disabled>确认导入新增</button>
+                <button type="button" class="btn btn--ghost" id="btnOpmlCancel">取消</button>
+              </div>
+              <div id="opmlSummary" class="muted"></div>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <!-- 设置 -->
+      <section id="tab-settings" class="hidden">
+        <div class="card settings-card">
+          <div class="card__head">
+            <div class="card__head-main"><h2>收听记录</h2></div>
+          </div>
+          <p class="muted" id="playEventsNote">
+            进度与收听历史保存在本插件（按节目 feed + 单集 guid），不是宿主播放历史。
+            正在检测是否已订阅宿主播放事件…
+          </p>
+        </div>
+
+        <div class="card settings-card">
+          <div class="card__head">
+            <div class="card__head-main"><h2>订阅索引</h2></div>
+          </div>
+          <p class="muted">
+            控制每个订阅在本地保留多少集。所有刷新方式（定时、手动、频道弹窗里的「刷新」）都使用这个深度；
+            超出部分只保留<strong>最近</strong>的 N 集，列表里的「已截断」只是提示，不是错误。
+          </p>
+          <div class="field">
+            <label for="maxEpisodes">索引深度（每订阅保留最近集数）</label>
+            <input id="maxEpisodes" type="number" min="1" max="200" value="50" />
+            <div class="field-hint muted" id="maxEpisodesHint">可填 1–200，默认 50。</div>
+          </div>
+          <div class="row">
+            <button type="button" class="btn btn--primary" id="btnSaveIndex">保存索引深度</button>
+          </div>
+        </div>
+
+        <div class="card settings-card">
+          <div class="card__head">
+            <div class="card__head-main"><h2>定时刷新</h2></div>
+          </div>
+          <label><input id="scheduleEnabled" type="checkbox" /> 启用定时刷新</label>
+          <div class="field">
+            <label for="scheduleInterval">间隔（小时）</label>
+            <select id="scheduleInterval">
+              <option value="6">6</option>
+              <option value="12">12</option>
+              <option value="24">24</option>
+            </select>
+          </div>
+          <div id="scheduleMeta" class="muted settings-meta">下次：—</div>
+          <div class="row">
+            <button type="button" class="btn btn--primary" id="btnSaveSchedule">保存</button>
+          </div>
+        </div>
+
+        <div class="card settings-card">
+          <div class="card__head">
+            <div class="card__head-main"><h2>智能音箱</h2></div>
+            <div class="toolbar">
+              <button type="button" class="icon-btn" id="btnCastRefresh" title="刷新音箱列表">
+                <span data-icon="rotateCcw" data-size="16"></span>
+              </button>
+            </div>
+          </div>
+          <p class="muted">
+            通过「智能音箱」插件（entryPath <code>miot</code>）把单集推送到小爱音箱：插件读取已登录账号下的设备，
+            再把本机可达的单集播放地址推给它。
+          </p>
+          <div id="castDeviceList" class="cast-devices">
+            <div class="empty">正在读取音箱…</div>
+          </div>
+          <div class="row">
+            <button type="button" class="btn btn--tonal" id="btnTestCast">投放当前单集</button>
+            <button type="button" class="btn btn--ghost" id="btnOpenMiot">打开智能音箱插件</button>
+          </div>
+        </div>
+
+        <div class="card settings-card">
+          <div class="card__head">
+            <div class="card__head-main"><h2>最近日志</h2></div>
+            <div class="toolbar">
+              <button type="button" class="icon-btn" id="btnReloadLog" title="刷新日志">
+                <span data-icon="rotateCcw" data-size="16"></span>
+              </button>
+            </div>
+          </div>
+          <pre id="logBox" class="pre-log">（空）</pre>
+        </div>
+      </section>
+    </main>
+
+    <aside class="queue-panel" id="queuePanel" aria-label="播放列表">
+      <div class="queue-panel__backdrop" id="queueBackdrop"></div>
+      <div class="queue-sheet">
+        <div class="queue-sheet__grab" id="queueGrab"></div>
+        <div class="card__head">
+          <div class="card__head-main" style="flex-direction:column;align-items:flex-start;gap:2px">
+            <h2>播放列表</h2>
+            <p id="queueMeta" class="sub">固定宿主歌单</p>
+          </div>
+          <div class="more-wrap" data-more-wrap="queue-panel">
+            <button type="button" class="icon-btn" id="btnQueueMenu" title="播放列表操作">
+              <span data-icon="moreHorizontal" data-size="17"></span>
+            </button>
+            <div class="more-menu more-menu--down">
+              <button type="button" data-queue-act="select"><span data-icon="listChecks" data-size="15"></span><span>多选</span></button>
+              <button type="button" data-queue-act="remove-played"><span data-icon="checkCircle" data-size="15"></span><span>移除已播放</span></button>
+              <button type="button" data-queue-act="cast-all"><span data-icon="speaker" data-size="15"></span><span>整张列表投放到音箱</span></button>
+              <button type="button" data-queue-act="refresh"><span data-icon="rotateCcw" data-size="15"></span><span>刷新</span></button>
+              <button type="button" data-queue-act="replace"><span data-icon="play" data-size="15"></span><span>替换并播放</span></button>
+              <div class="sep"></div>
+              <button type="button" class="danger-text" data-queue-act="clear"><span data-icon="trash" data-size="15"></span><span>清空播放列表</span></button>
+            </div>
+          </div>
+        </div>
+
+        <div id="queueSelectBar" class="row row--tight hidden" style="margin-bottom:8px">
+          <button type="button" class="btn btn--danger btn--sm" id="btnQueueDeleteSelected" disabled>删除所选</button>
+          <button type="button" class="btn btn--ghost btn--sm" id="btnQueueSelectCancel">取消</button>
+        </div>
+
+        <div class="queue-list-wrap">
+          <div id="queueList" class="q-list scroll-body">
+            <div class="empty">加载中…</div>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <div class="player is-empty" id="playerBar" aria-label="播放器" role="region">
+    <div class="player__line"><i id="playerLine"></i></div>
+    <div class="player__cover placeholder" id="playerCover">封面</div>
+    <div class="player__main">
+      <button type="button" class="player__meta" id="playerMeta" title="展开播放控制">
+        <div class="player__title" id="playerTitle">尚未播放</div>
+        <div class="player__sub" id="playerSub"></div>
+      </button>
+      <div class="player__seek">
+        <div class="player__times">
+          <span id="playerPos">0:00</span>
+          <span id="playerDur">0:00</span>
+        </div>
+        <input class="player__range" id="playerSeek" type="range" min="0" max="1000" value="0" step="1" disabled />
+      </div>
+    </div>
+    <div class="player__controls">
+      <button type="button" class="icon-btn" id="btnSeekBack" title="后退 15 秒">
+        <span data-icon="rewind" data-size="18"></span>
+      </button>
+      <button type="button" class="icon-btn icon-btn--primary" id="btnPlayPause" title="播放/暂停">
+        <span data-icon="play" data-size="20"></span>
+      </button>
+      <button type="button" class="icon-btn" id="btnSeekFwd" title="前进 15 秒">
+        <span data-icon="forward" data-size="18"></span>
+      </button>
+      <button type="button" class="icon-btn" id="btnPlayerCast" title="投放到小爱音箱">
+        <span data-icon="speaker" data-size="18"></span>
+      </button>
     </div>
   </div>
 
-  <div class="card">
-    <h2>OPML 导入</h2>
-    <p class="muted">通用 OPML 2.0 订阅清单 → 预览 → 确认后只新增管理项（不自动刷新、不播放）。文件夹仅作预览路径。</p>
-    <label for="opmlFile">上传 .opml</label>
-    <input id="opmlFile" type="file" accept=".opml,.xml,text/xml,application/xml" />
-    <label for="opmlText">或粘贴 OPML</label>
-    <textarea id="opmlText" placeholder="&lt;opml version=&quot;2.0&quot;&gt;…"></textarea>
-    <div class="row">
-      <button type="button" id="btnOpmlPreview">预览</button>
-      <button type="button" id="btnOpmlImport" disabled>确认导入新增</button>
-      <button type="button" class="secondary" id="btnOpmlCancel">取消</button>
-    </div>
-    <div id="opmlSummary" class="opml-summary muted"></div>
-    <div id="opmlList" class="opml-list"></div>
-  </div>
-
-  <div class="card">
-    <h2>订阅列表</h2>
-    <div id="subList" class="sub-list"><div class="empty">加载中…</div></div>
-  </div>
-
-  <div class="card" id="episodesCard" hidden>
-    <h2 id="episodesTitle">剧集</h2>
-    <p id="episodesTip" class="muted"></p>
-    <div id="epList" class="ep-list"></div>
-  </div>
-
-  <div class="card">
-    <h2>定时刷新</h2>
-    <p class="muted">默认关闭。开启后按间隔重拉全部订阅（插件内定时器，不挂音箱 cron）。</p>
-    <div class="check">
-      <input id="scheduleEnabled" type="checkbox" />
-      <label for="scheduleEnabled">启用定时刷新</label>
-    </div>
-    <label for="scheduleInterval">间隔（小时）</label>
-    <select id="scheduleInterval">
-      <option value="6" selected>6</option>
-      <option value="12">12</option>
-      <option value="24">24</option>
-    </select>
-    <label for="maxEpisodes">每订阅最近剧集数</label>
-    <input id="maxEpisodes" type="number" min="1" max="200" value="50" />
-    <div id="scheduleMeta" class="muted" style="margin-top:8px">下次：—</div>
-    <div class="row">
-      <button type="button" id="btnSaveSchedule">保存定时 / 设置</button>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2>最近日志</h2>
-    <pre id="logBox" class="log muted">（空）</pre>
-  </div>
+  <button type="button" class="fab" id="btnBackToTop" aria-label="返回顶部" title="返回顶部">
+    <span data-icon="arrowUp" data-size="18"></span>
+  </button>
 
   <script src="js/app.js"></script>
 </body>

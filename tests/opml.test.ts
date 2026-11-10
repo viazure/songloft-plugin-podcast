@@ -229,7 +229,7 @@ describe("preview + import (stubs only, no network)", () => {
     const list = await store.loadSubscriptions();
     expect(list).toHaveLength(2);
     expect(list[0].episodeCount).toBe(0);
-    expect(list[0].playlistId).toBeNull();
+    expect(list[0].episodes).toEqual([]);
 
     const prev2 = await runOpmlPreview(mini);
     expect(prev2.ok && prev2.preview.summary.neu).toBe(0);
