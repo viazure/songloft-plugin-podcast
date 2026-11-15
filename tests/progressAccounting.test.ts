@@ -10,6 +10,7 @@ import {
   recordHistory,
   loadHistory,
   loadAllProgress,
+  saveSubscriptions,
   upsertProgress,
   withStorageLock,
   episodeStorageKey,
@@ -281,5 +282,90 @@ describe("play events (P1)", () => {
     });
     expect(await loadHistory()).toEqual([]);
     expect(await loadAllProgress()).toEqual([]);
+  });
+});
+
+describe("mapping identity enrichment", () => {
+  let bag: Bag;
+
+  beforeEach(() => {
+    bag = installStorage();
+  });
+
+  it("mapping hits still carry the song title instead of Untitled", async () => {
+    const feedUrl = "https://feed.xyzfm.space/m3dda867gh7j";
+    const guid = "6aa41efc492687f6aad88f7f";
+    const title = "No.233 单口｜手机为什么要折叠？Apple 为什么要「跟风」？";
+    await rememberSongMapping(6574, feedUrl, guid);
+    const songs = bag.__songs as Record<number, unknown>;
+    songs[6574] = {
+      id: 6574,
+      title,
+      artist: "三五环",
+      cover_url: "https://cdn/ep.jpg",
+      source_data: JSON.stringify({
+        feedUrl,
+        guid,
+        showTitle: "三五环",
+        coverUrl: "https://cdn/ep.jpg",
+      }),
+    };
+    const id = await resolveEpisodeIdentity(6574);
+    expect(id).toMatchObject({
+      source: "mapping",
+      guid,
+      title,
+      showTitle: "三五环",
+      coverUrl: "https://cdn/ep.jpg",
+    });
+  });
+
+  it("fills mapping identity from the subscription index when the song title is Untitled", async () => {
+    const feedUrl = "https://feed.example/s.xml";
+    const guid = "ep-1";
+    await rememberSongMapping(8, feedUrl, guid);
+    const songs = bag.__songs as Record<number, unknown>;
+    songs[8] = {
+      id: 8,
+      title: "Untitled",
+      artist: "",
+      source_data: JSON.stringify({ feedUrl, guid }),
+    };
+    await saveSubscriptions([
+      {
+        id: "s1",
+        url: feedUrl,
+        title: "The Show",
+        author: null,
+        coverUrl: null,
+        createdAt: 1,
+        updatedAt: 1,
+        lastSuccessAt: 1,
+        lastError: null,
+        lastSkippedNonAudio: 0,
+        episodeCount: 1,
+        truncated: false,
+        episodes: [
+          {
+            title: "Real Episode",
+            guid,
+            guidSource: "rss",
+            pubDate: null,
+            pubDateMs: null,
+            durationSec: 120,
+            coverUrl: "https://cdn/real.jpg",
+            enclosureUrl: "https://cdn/a.mp3",
+            dedupKey: "d",
+          },
+        ],
+      },
+    ]);
+    const id = await resolveEpisodeIdentity(8);
+    expect(id).toMatchObject({
+      source: "mapping",
+      title: "Real Episode",
+      showTitle: "The Show",
+      coverUrl: "https://cdn/real.jpg",
+    });
   });
 });

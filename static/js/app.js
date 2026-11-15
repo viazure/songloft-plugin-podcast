@@ -60,6 +60,20 @@
     if (!btn) return;
     btn.innerHTML = icon(name, size || 18);
   }
+  function replaceIcon(el2, name, size) {
+    if (!el2 || typeof el2.querySelector !== "function") return false;
+    if (!ICONS[name]) return false;
+    const ico = el2.querySelector(".ico");
+    if (!ico) return false;
+    let s = size;
+    if (s == null) {
+      const raw = typeof ico.getAttribute === "function" && ico.getAttribute("style") || "";
+      const m = /width:\s*(\d+)/.exec(String(raw));
+      s = m ? Number(m[1]) : 18;
+    }
+    ico.outerHTML = icon(name, s);
+    return true;
+  }
   function hydrateIconSlots(root) {
     const scope = root || document;
     scope.querySelectorAll("[data-icon]").forEach((el2) => {
@@ -97,6 +111,8 @@
     if (typeof dialog.close === "function" && dialog.open) dialog.close();
     else dialog.removeAttribute("open");
     dialog.classList.remove("modal--wide", "modal--sheet");
+    const foot = dialog.querySelector("#appModalFoot");
+    if (foot) foot.className = "modal__foot";
     const done = modalResolve;
     modalResolve = null;
     if (done) done(result);
@@ -113,6 +129,7 @@
     bodyEl.innerHTML = "";
     if (opts.body instanceof Node) bodyEl.appendChild(opts.body);
     else if (typeof opts.body === "string") bodyEl.innerHTML = opts.body;
+    footEl.className = "modal__foot" + (opts.footClass ? ` ${opts.footClass}` : "");
     footEl.innerHTML = "";
     const actions = opts.actions || [{ label: "\u5173\u95ED", value: void 0, close: true }];
     for (const action of actions) {
@@ -120,7 +137,18 @@
       btn.type = "button";
       const kind = action.kind || "ghost";
       btn.className = kind === "primary" ? "btn btn--primary" : kind === "danger" ? "btn btn--danger" : kind === "tonal" ? "btn btn--tonal" : "btn btn--ghost";
-      btn.innerHTML = (action.iconName ? icon(action.iconName, 15) : "") + `<span>${escapeHtml(action.label)}</span>`;
+      const fullName = action.ariaLabel || action.label;
+      btn.setAttribute("aria-label", fullName);
+      btn.title = action.title || fullName;
+      if (action.ariaPressed != null) {
+        btn.setAttribute("aria-pressed", action.ariaPressed ? "true" : "false");
+      }
+      const iconHtml = action.iconName ? icon(action.iconName, 15) : "";
+      if (action.shortLabel) {
+        btn.innerHTML = iconHtml + `<span class="btn-label-full">${escapeHtml(action.label)}</span><span class="btn-label-short">${escapeHtml(action.shortLabel)}</span>`;
+      } else {
+        btn.innerHTML = iconHtml + `<span>${escapeHtml(action.label)}</span>`;
+      }
       btn.addEventListener("click", async () => {
         if (action.onClick) {
           const keepOpen = await action.onClick();
@@ -288,6 +316,20 @@
     }
     return root.player;
   }
+  function hasSetQueue() {
+    try {
+      return typeof requirePlayer().setQueue === "function";
+    } catch {
+      return false;
+    }
+  }
+  function requireSetQueue() {
+    const player = requirePlayer();
+    if (typeof player.setQueue !== "function") {
+      throw new Error("\u5BBF\u4E3B\u4E0D\u652F\u6301\u6574\u8868\u64AD\u653E\uFF08\u8BF7\u5728 Songloft \u5BA2\u6237\u7AEF\u5185\u6253\u5F00\u672C\u63D2\u4EF6\uFF0C\u6216\u5347\u7EA7\u5BBF\u4E3B\uFF09");
+    }
+    return player;
+  }
   async function play(songId) {
     const player = requirePlayer();
     if (songId == null) return player.play();
@@ -305,11 +347,21 @@
   async function seek(seconds) {
     return requirePlayer().seek(Number(seconds));
   }
-  async function replaceQueueAndPlay(songIds, startIndex) {
-    return requirePlayer().setQueue(
-      songIds.map(Number),
-      { startIndex: startIndex || 0 }
-    );
+  async function replaceQueueAndPlay(songIds, startIndex, opts = {}) {
+    const player = requireSetQueue();
+    const options = { startIndex: startIndex == null ? 0 : Number(startIndex) };
+    const sourceId = opts && opts.sourcePlaylistId;
+    if (sourceId != null && sourceId !== "" && Number.isFinite(Number(sourceId))) {
+      options.sourcePlaylistId = Number(sourceId);
+    }
+    return player.setQueue(songIds.map(Number), options);
+  }
+  async function setPlayMode(mode) {
+    const player = requirePlayer();
+    if (typeof player.setPlayMode !== "function") {
+      throw new Error("\u5BBF\u4E3B\u4E0D\u652F\u6301\u5207\u6362\u64AD\u653E\u6A21\u5F0F");
+    }
+    return player.setPlayMode(mode);
   }
 
   // ui/lib/playback.js
@@ -721,6 +773,296 @@
     });
   }
 
+  // ui/lib/queueMembership.js
+  function normalizeFeedKey(url) {
+    return String(url || "").trim().replace(/\/+$/, "").toLowerCase();
+  }
+  function episodeKey(feedUrl, guid) {
+    const feed = normalizeFeedKey(feedUrl);
+    const g = String(guid || "").trim();
+    if (!feed || !g) return "";
+    return `${feed}::${g}`;
+  }
+  function buildQueueIndex(queueSongs) {
+    const ids = /* @__PURE__ */ new Set();
+    const keys = /* @__PURE__ */ new Set();
+    for (const song of Array.isArray(queueSongs) ? queueSongs : []) {
+      if (!song || song.pending) continue;
+      const id = Number(song.id);
+      if (Number.isFinite(id)) ids.add(id);
+      const key = episodeKey(song.feedUrl, song.guid);
+      if (key) keys.add(key);
+    }
+    return { ids, keys };
+  }
+  function isInPodcastQueue(ep, index) {
+    if (!ep || !index) return false;
+    const rawId = ep.songId;
+    const songId = rawId == null || rawId === "" ? null : Number(rawId);
+    if (songId != null && Number.isFinite(songId) && index.ids.has(songId)) return true;
+    const key = episodeKey(ep.feedUrl, ep.guid);
+    return !!key && index.keys.has(key);
+  }
+  var QUEUE_ADD_LABEL = "\u52A0\u5165\u64AD\u653E\u5217\u8868";
+  var QUEUE_IN_LABEL = "\u5DF2\u5728\u64AD\u653E\u5217\u8868";
+  var QUEUE_ADD_ICON = "listPlus";
+  var QUEUE_IN_ICON = "listChecks";
+  function queueButtonState(ep, index) {
+    const inQueue = isInPodcastQueue(ep, index);
+    return {
+      inQueue,
+      label: inQueue ? QUEUE_IN_LABEL : QUEUE_ADD_LABEL,
+      iconName: inQueue ? QUEUE_IN_ICON : QUEUE_ADD_ICON,
+      ariaPressed: inQueue,
+      ariaDisabled: inQueue
+    };
+  }
+  function escapeAttr(value) {
+    return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+  function queueButtonAttrs(ep, index) {
+    return queueMarkers(ep, index);
+  }
+  function queueMenuAttrs(ep, index, idx) {
+    const bits = [`data-idx="${idx}"`, queueMarkers(ep, index)];
+    return bits.join(" ");
+  }
+  function queueMarkers(ep, index) {
+    const state3 = queueButtonState(ep, index);
+    const rawId = ep && ep.songId;
+    const songId = rawId == null || rawId === "" ? NaN : Number(rawId);
+    const key = episodeKey(ep && ep.feedUrl, ep && ep.guid);
+    const bits = [
+      `aria-pressed="${state3.ariaPressed ? "true" : "false"}"`,
+      `aria-disabled="${state3.ariaDisabled ? "true" : "false"}"`,
+      `title="${state3.label}"`
+    ];
+    if (Number.isFinite(songId)) bits.push(`data-queue-song="${songId}"`);
+    if (key) bits.push(`data-queue-key="${escapeAttr(key)}"`);
+    if (state3.inQueue) bits.push('data-in-queue="1"');
+    return bits.join(" ");
+  }
+  function repaintQueueButtons(root, index) {
+    if (!root || typeof root.querySelectorAll !== "function" || !index) return 0;
+    let updated = 0;
+    root.querySelectorAll("[data-queue-song], [data-queue-key]").forEach((btn) => {
+      const songAttr = btn.getAttribute("data-queue-song");
+      const keyAttr = btn.getAttribute("data-queue-key") || "";
+      const songId = songAttr != null && songAttr !== "" ? Number(songAttr) : null;
+      const inQueue = songId != null && Number.isFinite(songId) && index.ids.has(songId) || !!keyAttr && index.keys.has(keyAttr);
+      const label = inQueue ? QUEUE_IN_LABEL : QUEUE_ADD_LABEL;
+      const iconName = inQueue ? QUEUE_IN_ICON : QUEUE_ADD_ICON;
+      btn.setAttribute("aria-pressed", inQueue ? "true" : "false");
+      btn.setAttribute("aria-disabled", inQueue ? "true" : "false");
+      if (inQueue) btn.setAttribute("data-in-queue", "1");
+      else btn.removeAttribute("data-in-queue");
+      btn.setAttribute("title", label);
+      btn.classList.toggle("is-in-queue", inQueue);
+      replaceIcon(btn, iconName);
+      const span = btn.querySelector("span:not(.ico)");
+      if (span) span.textContent = label;
+      updated += 1;
+    });
+    return updated;
+  }
+
+  // ui/lib/queueOptimistic.js
+  function createQueueWriteTracker() {
+    let gen = 0;
+    let pending = 0;
+    return {
+      /** Take ownership of the queue for a new mutation. */
+      begin() {
+        gen += 1;
+        pending += 1;
+        return gen;
+      },
+      /** Mark a mutation finished. Safe if already idle. */
+      end() {
+        if (pending > 0) pending -= 1;
+      },
+      /** True while at least one mutation has begun and not yet ended. */
+      isPending() {
+        return pending > 0;
+      },
+      /** True when `token` is still the newest mutation. */
+      isCurrent(token) {
+        return token === gen;
+      },
+      current() {
+        return gen;
+      }
+    };
+  }
+  function snapshotQueue(data2) {
+    const songs = data2 && Array.isArray(data2.queueSongs) ? data2.queueSongs : [];
+    return { queueSongs: songs.slice(), queueMeta: data2 && data2.queueMeta || null };
+  }
+  function withoutSongs(songs, songIds) {
+    const drop = new Set((songIds || []).map(Number).filter(Number.isFinite));
+    return (Array.isArray(songs) ? songs : []).filter((s) => !drop.has(Number(s && s.id)));
+  }
+  function playedSongs(songs) {
+    return (Array.isArray(songs) ? songs : []).filter((s) => s && s.progress && s.progress.completed);
+  }
+  function rollbackPlan(input) {
+    const { before, token, tracker } = input || {};
+    if (!tracker || !tracker.isCurrent(token)) return { patch: null, discarded: true };
+    return {
+      patch: { queueSongs: before && before.queueSongs || [], queueMeta: before && before.queueMeta || null },
+      discarded: false
+    };
+  }
+  function shouldApplyQueueResponse(token, tracker) {
+    return !!tracker && tracker.isCurrent(token);
+  }
+  function reorderSongs(songs, orderedIds) {
+    const list = Array.isArray(songs) ? songs : [];
+    const byId = /* @__PURE__ */ new Map();
+    for (const song of list) {
+      const id = Number(song && song.id);
+      if (Number.isFinite(id) && !byId.has(id)) byId.set(id, song);
+    }
+    const next = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const raw of Array.isArray(orderedIds) ? orderedIds : []) {
+      const id = Number(raw);
+      if (!Number.isFinite(id) || seen.has(id)) continue;
+      const song = byId.get(id);
+      if (!song) continue;
+      next.push(song);
+      seen.add(id);
+    }
+    for (const song of list) {
+      const id = Number(song && song.id);
+      if (!seen.has(id)) {
+        next.push(song);
+        if (Number.isFinite(id)) seen.add(id);
+      }
+    }
+    return next;
+  }
+  function episodeIdentity(ep) {
+    const feed = String(ep && ep.feedUrl || "").trim().replace(/\/+$/, "").toLowerCase();
+    const guid = String(ep && ep.guid || "").trim();
+    if (feed && guid) return `${feed}::${guid}`;
+    return String(ep && ep.dedupKey || "").trim();
+  }
+  function pendingSongId(ep) {
+    const key = episodeIdentity(ep) || String(ep && ep.title || "episode");
+    return `pending:${key}`;
+  }
+  function isPendingQueueSong(song) {
+    return !!(song && song.pending);
+  }
+  function sameEpisode(song, ep) {
+    if (!song || !ep) return false;
+    if (song.id && song.id === pendingSongId(ep)) return true;
+    const a = episodeIdentity(song);
+    const b = episodeIdentity(ep);
+    return !!a && a === b;
+  }
+  function hasPendingSong(songs, ep) {
+    return (Array.isArray(songs) ? songs : []).some(
+      (song) => isPendingQueueSong(song) && sameEpisode(song, ep)
+    );
+  }
+  function appendPendingSong(songs, ep) {
+    const list = Array.isArray(songs) ? songs.slice() : [];
+    if (!ep) return list;
+    if (list.some((song) => sameEpisode(song, ep))) return list;
+    list.push({
+      id: pendingSongId(ep),
+      pending: true,
+      title: ep.title || "",
+      artist: ep.showTitle || "",
+      album: ep.showTitle || "",
+      coverUrl: ep.coverUrl || null,
+      feedUrl: ep.feedUrl || "",
+      guid: ep.guid || "",
+      duration: ep.durationSec ?? null,
+      favorited: !!ep.favorited
+    });
+    return list;
+  }
+
+  // ui/lib/playThrough.js
+  var PLAY_THROUGH_LABEL = "\u4ECE\u8FD9\u4E00\u96C6\u5F00\u59CB\uFF0C\u6309\u64AD\u653E\u5217\u8868\u987A\u5E8F\u7EE7\u7EED";
+  var SET_QUEUE_UNAVAILABLE = "\u5BBF\u4E3B\u4E0D\u652F\u6301\u6574\u8868\u64AD\u653E\u3002\u8BF7\u5728 Songloft \u5BA2\u6237\u7AEF\u5185\u6253\u5F00\u672C\u63D2\u4EF6\uFF0C\u6216\u5347\u7EA7\u5BBF\u4E3B\u540E\u518D\u8BD5\u3002";
+  var PLAY_FROM_START_TITLE = "\u4ECE\u5217\u8868\u5F00\u5934\u64AD\u653E";
+  var PLAY_FROM_START_MESSAGE = "\u5C06\u7528\u300C\u64AD\u5BA2\u300D\u5217\u8868\u66FF\u6362\u5F53\u524D\u6B63\u5728\u64AD\u653E\u7684\u5185\u5BB9\uFF0C\u5E76\u4ECE\u7B2C\u4E00\u9996\u5F00\u59CB\u3002\u64AD\u5B8C\u4E00\u96C6\u540E\u4F1A\u81EA\u52A8\u7EE7\u7EED\u4E0B\u4E00\u96C6\u3002";
+  var PLAY_FROM_START_OK = "\u5F00\u59CB\u64AD\u653E";
+  var SINGLE_MODE_TITLE = "\u6539\u4E3A\u987A\u5E8F\u64AD\u653E\uFF1F";
+  var SINGLE_MODE_MESSAGE = "\u5F53\u524D\u662F\u5355\u66F2\u6A21\u5F0F\uFF0C\u64AD\u5B8C\u8FD9\u4E00\u96C6\u540E\u4E0D\u4F1A\u81EA\u52A8\u7EE7\u7EED\u4E0B\u4E00\u96C6\u3002\u6539\u4E3A\u987A\u5E8F\u64AD\u653E\u540E\uFF0C\u4F1A\u6309\u300C\u64AD\u5BA2\u300D\u5217\u8868\u7EE7\u7EED\u3002";
+  var SINGLE_MODE_OK = "\u6539\u4E3A\u987A\u5E8F\u64AD\u653E";
+  function episodeSongId(ep) {
+    if (!ep) return null;
+    const raw = ep.songId != null && ep.songId !== "" ? ep.songId : ep.id;
+    if (raw == null || raw === "") return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  }
+  function playButtonLabel({ isCurrent, phase, pending } = {}) {
+    if (pending) return "\u6B63\u5728\u52A0\u5165\u2026";
+    if (isCurrent && phase === "playing") return "\u6682\u505C";
+    if (isCurrent) return "\u7EE7\u7EED";
+    return PLAY_THROUGH_LABEL;
+  }
+  function readyQueueSongIds(songs) {
+    const ids = [];
+    for (const song of Array.isArray(songs) ? songs : []) {
+      if (!song || song.pending) continue;
+      const id = episodeSongId(song);
+      if (id != null) ids.push(id);
+    }
+    return ids;
+  }
+  function queueIdsForStart(songs, targetId) {
+    const ids = readyQueueSongIds(songs);
+    const tid = targetId == null || targetId === "" ? null : Number(targetId);
+    if (tid == null || !Number.isFinite(tid)) {
+      return { ids, startIndex: 0 };
+    }
+    let startIndex = ids.indexOf(tid);
+    if (startIndex < 0) {
+      ids.push(tid);
+      startIndex = ids.length - 1;
+    }
+    return { ids, startIndex };
+  }
+  function isSinglePlayMode(mode) {
+    return mode === "single" || mode === "singlePlay";
+  }
+  function readPlayMode(state3) {
+    if (!state3) return null;
+    const mode = state3.play_mode != null ? state3.play_mode : state3.playMode;
+    return mode == null || mode === "" ? null : String(mode);
+  }
+  function extractQueueIds(state3) {
+    if (!state3) return null;
+    const raw = state3.queue || state3.songs || state3.song_ids || state3.songIds || state3.playlist && (state3.playlist.songs || state3.playlist.song_ids);
+    if (!Array.isArray(raw)) return null;
+    const ids = [];
+    for (const item of raw) {
+      if (typeof item === "number" && Number.isFinite(item)) {
+        ids.push(item);
+        continue;
+      }
+      if (item && (item.id != null || item.songId != null)) {
+        const n = Number(item.id != null ? item.id : item.songId);
+        if (Number.isFinite(n)) ids.push(n);
+      }
+    }
+    return ids;
+  }
+  function hostQueueMatches(state3, ids) {
+    const want = (Array.isArray(ids) ? ids : []).map(Number);
+    if (!want.length) return false;
+    const queueIds = extractQueueIds(state3);
+    if (!queueIds || queueIds.length !== want.length) return false;
+    return queueIds.every((id, i) => id === want[i]);
+  }
+
   // ui/lib/actions.js
   var recentToasts = /* @__PURE__ */ new Map();
   var TOAST_DEDUPE_MS = 1200;
@@ -807,8 +1149,13 @@
     };
   }
   async function reloadQueue() {
+    if (queueWrites.isPending()) return getData();
+    const token = queueWrites.current();
     try {
       const r = await api.queue();
+      if (queueWrites.isPending() || !shouldApplyQueueResponse(token, queueWrites)) {
+        return getData();
+      }
       if (!r.ok) {
         patch({ queueSongs: [], queueMeta: null });
         return getData();
@@ -817,11 +1164,58 @@
         queueSongs: r.songs || [],
         queueMeta: { playlistId: r.playlistId, playlistName: r.playlistName }
       });
+      const data2 = getData();
+      for (const fn of queueRepainters) {
+        try {
+          fn(buildQueueIndex(data2.queueSongs));
+        } catch (_) {
+        }
+      }
     } catch (e) {
+      if (queueWrites.isPending() || !shouldApplyQueueResponse(token, queueWrites)) {
+        return getData();
+      }
       patch({ queueSongs: [], queueMeta: null });
       notify("\u8BFB\u53D6\u64AD\u653E\u5217\u8868\u5931\u8D25\uFF08\u9700\u5BBF\u4E3B playlists \u6743\u9650\uFF09", "warn");
     }
     return getData();
+  }
+  var queueRepainters = /* @__PURE__ */ new Set();
+  var queueViewListeners = /* @__PURE__ */ new Set();
+  function onQueueChange(fn) {
+    if (typeof fn !== "function") return () => {
+    };
+    queueRepainters.add(fn);
+    return () => queueRepainters.delete(fn);
+  }
+  function onQueueViewChange(fn) {
+    if (typeof fn !== "function") return () => {
+    };
+    queueViewListeners.add(fn);
+    return () => queueViewListeners.delete(fn);
+  }
+  function notifyQueueViews() {
+    for (const fn of queueViewListeners) {
+      try {
+        fn();
+      } catch (_) {
+      }
+    }
+  }
+  var queueRevealers = /* @__PURE__ */ new Set();
+  function onEnsureQueueVisible(fn) {
+    if (typeof fn !== "function") return () => {
+    };
+    queueRevealers.add(fn);
+    return () => queueRevealers.delete(fn);
+  }
+  function ensureQueueVisible() {
+    for (const fn of queueRevealers) {
+      try {
+        fn();
+      } catch (_) {
+      }
+    }
   }
   async function reloadRecent() {
     const home = await api.home();
@@ -978,12 +1372,36 @@
     }
     return false;
   }
+  async function ensureSequentialPlayMode() {
+    let st;
+    try {
+      st = await getState();
+    } catch {
+      return;
+    }
+    if (!isSinglePlayMode(readPlayMode(st))) return;
+    const ok = await uiConfirm({
+      title: SINGLE_MODE_TITLE,
+      message: SINGLE_MODE_MESSAGE,
+      okText: SINGLE_MODE_OK
+    });
+    if (!ok) return;
+    try {
+      await setPlayMode("order");
+    } catch (e) {
+      notify(String(e && e.message || e), "err");
+    }
+  }
   async function playEpisode(ep, opts = {}) {
     if (!caps.available || !caps.hasPlayer) {
       notify("\u5BBF\u4E3B\u64AD\u653E\u5668\u4E0D\u53EF\u7528", "warn");
       return;
     }
-    let songId = ep.songId;
+    if (!hasSetQueue()) {
+      notify(SET_QUEUE_UNAVAILABLE, "err");
+      return;
+    }
+    let songId = episodeSongId(ep);
     const ctx = {
       subscriptionId: ep.subscriptionId || "",
       feedUrl: ep.feedUrl || "",
@@ -1035,8 +1453,33 @@
           }
         }
       }
+      const membershipEp = { ...ep, ...ctx, songId };
+      const queuedNow = getData().queueSongs || [];
+      if (!isInPodcastQueue(membershipEp, buildQueueIndex(queuedNow)) && !hasPendingSong(queuedNow, membershipEp)) {
+        const added = await addToQueue(membershipEp, null, { quiet: true });
+        if (!added || !added.ok) {
+          notify("\u672A\u80FD\u52A0\u5165\u64AD\u653E\u5217\u8868\uFF0C\u4ECD\u5C06\u4ECE\u8FD9\u4E00\u96C6\u5F00\u59CB", "warn");
+        }
+      }
+      const { ids, startIndex } = queueIdsForStart(getData().queueSongs, songId);
+      if (!ids.length) {
+        notify("\u6CA1\u6709\u53EF\u64AD\u653E\u7684\u5185\u5BB9", "warn");
+        return;
+      }
+      await ensureSequentialPlayMode();
+      let hostState = null;
+      try {
+        hostState = await getState();
+      } catch (_) {
+      }
+      const sameList = hostQueueMatches(hostState, ids);
       beginPlayRequest({ ...ctx, songId });
-      await play(songId);
+      if (sameList) {
+        await play(songId);
+      } else {
+        const playlistId = getData().queueMeta && getData().queueMeta.playlistId;
+        await replaceQueueAndPlay(ids, startIndex, { sourcePlaylistId: playlistId });
+      }
       notify(`\u6B63\u5728\u64AD\u653E\u300C${ctx.title || "\u5F53\u524D\u5355\u96C6"}\u300D`, "ok");
       const ok = await syncPlayStateAfterRequest(songId);
       if (!ok) {
@@ -1091,16 +1534,6 @@
         }).catch(() => {
         });
       }
-      if (!getData().queueSongs.some((s) => s.id === songId)) {
-        api.queueAddIds([songId]).then((r) => {
-          if (r && r.ok && (r.added || 0) > 0) {
-            notify("\u5DF2\u52A0\u5165\u300C\u64AD\u5BA2\u300D\u64AD\u653E\u5217\u8868", "ok");
-          }
-          return reloadQueue();
-        }).catch(() => {
-          notify("\u672A\u80FD\u81EA\u52A8\u52A0\u5165\u64AD\u653E\u5217\u8868\uFF0C\u53EF\u624B\u52A8\u300C\u52A0\u5165\u64AD\u653E\u5217\u8868\u300D", "warn");
-        });
-      }
     } catch (e) {
       playFailed(String(e && e.message || e));
       notify(String(e && e.message || e), "err");
@@ -1143,7 +1576,33 @@
       notify(String(e), "err");
     }
   }
-  async function addToQueue(ep) {
+  async function addToQueue(ep, btn, opts = {}) {
+    const quiet = !!opts.quiet;
+    const data2 = getData();
+    const index = buildQueueIndex(data2.queueSongs);
+    if (isInPodcastQueue(ep, index)) {
+      if (!quiet) notify(`\u300A${shortTitle(ep.title)}\u300B\u5DF2\u5728\u64AD\u653E\u5217\u8868\u300C\u64AD\u5BA2\u300D\u4E2D`, "warn");
+      return { ok: true, already: true };
+    }
+    if (hasPendingSong(data2.queueSongs, ep)) {
+      if (!quiet) {
+        notify(`\u6B63\u5728\u52A0\u5165\u300A${shortTitle(ep.title)}\u300B\u2026`, "muted");
+        ensureQueueVisible();
+      }
+      return { ok: false, pending: true };
+    }
+    if (btn) {
+      btn.setAttribute("aria-busy", "true");
+      btn.disabled = true;
+    }
+    const gen = beginQueueWrite();
+    const before = snapshotQueue(data2);
+    patch({
+      queueSongs: appendPendingSong(before.queueSongs, ep),
+      queueMeta: before.queueMeta
+    });
+    notifyQueueViews();
+    ensureQueueVisible();
     try {
       const r = await api.queueAdd({
         subscriptionId: ep.subscriptionId,
@@ -1151,18 +1610,30 @@
         dedupKey: ep.dedupKey
       });
       if (!r.ok) {
+        rollbackQueue(before, gen);
         notify(r.error || "\u52A0\u5165\u64AD\u653E\u5217\u8868\u5931\u8D25\uFF08\u51C6\u5907\u97F3\u9891\uFF09", "err");
-        return;
+        return { ok: false };
       }
       const name = r.playlistName || "\u64AD\u5BA2";
-      const bits = [];
-      if (r.added > 0) bits.push(`\u5DF2\u5C06\u300A${shortTitle(ep.title)}\u300B\u52A0\u5165\u64AD\u653E\u5217\u8868\u300C${name}\u300D`);
-      else if (r.skipped > 0) bits.push(`\u300A${shortTitle(ep.title)}\u300B\u5DF2\u5728\u64AD\u653E\u5217\u8868\u300C${name}\u300D\u4E2D`);
-      else bits.push(`\u672A\u80FD\u52A0\u5165\u64AD\u653E\u5217\u8868\u300C${name}\u300D`);
-      notify(bits.join(""), r.added > 0 ? "ok" : "warn");
-      await reloadQueue();
+      if (!quiet) {
+        const bits = [];
+        if (r.added > 0) bits.push(`\u5DF2\u5C06\u300A${shortTitle(ep.title)}\u300B\u52A0\u5165\u64AD\u653E\u5217\u8868\u300C${name}\u300D`);
+        else if (r.skipped > 0) bits.push(`\u300A${shortTitle(ep.title)}\u300B\u5DF2\u5728\u64AD\u653E\u5217\u8868\u300C${name}\u300D\u4E2D`);
+        else bits.push(`\u672A\u80FD\u52A0\u5165\u64AD\u653E\u5217\u8868\u300C${name}\u300D`);
+        notify(bits.join(""), r.added > 0 ? "ok" : "warn");
+      }
+      await reloadQueueIfCurrent(gen);
+      return { ok: true, already: (r.skipped || 0) > 0, added: (r.added || 0) > 0 };
     } catch (e) {
+      rollbackQueue(before, gen);
       notify(String(e), "err");
+      return { ok: false };
+    } finally {
+      queueWrites.end();
+      if (btn) {
+        btn.removeAttribute("aria-busy");
+        btn.disabled = false;
+      }
     }
   }
   async function toggleFavorite(ep, btn) {
@@ -1314,25 +1785,70 @@
       notify(String(e && e.message || e), "err");
     }
   }
-  async function removeSongs(songIds) {
-    if (!songIds || !songIds.length) return { ok: false };
-    const before = getData().queueSongs || [];
-    const drop = new Set(songIds.map(Number));
-    try {
-      const r = await api.queueRemove(songIds);
-      if (!r.ok) {
-        notify(r.error || "\u79FB\u9664\u5931\u8D25", "err");
-        return r;
+  var queueWrites = createQueueWriteTracker();
+  function beginQueueWrite() {
+    return queueWrites.begin();
+  }
+  function isStaleQueueWrite(gen) {
+    return !queueWrites.isCurrent(gen);
+  }
+  function repaintQueueButtonsNow() {
+    const index = buildQueueIndex(getData().queueSongs);
+    for (const fn of queueRepainters) {
+      try {
+        fn(index);
+      } catch (_) {
       }
+    }
+  }
+  async function reloadQueueIfCurrent(gen) {
+    if (isStaleQueueWrite(gen)) return;
+    try {
+      const r = await api.queue();
+      if (!r || !r.ok || !shouldApplyQueueResponse(gen, queueWrites)) return;
       patch({
-        queueSongs: before.filter((s) => !drop.has(s.id)),
-        queueMeta: getData().queueMeta
+        queueSongs: r.songs || [],
+        queueMeta: { playlistId: r.playlistId, playlistName: r.playlistName }
       });
-      await reloadQueue();
+      repaintQueueButtonsNow();
+      notifyQueueViews();
+    } catch (_) {
+    }
+  }
+  function rollbackQueue(before, gen) {
+    const plan = rollbackPlan({ before, token: gen, tracker: queueWrites });
+    if (!plan.patch) return false;
+    patch(plan.patch);
+    repaintQueueButtonsNow();
+    notifyQueueViews();
+    return true;
+  }
+  async function removeSongs(songIds) {
+    const ids = (Array.isArray(songIds) ? songIds : []).map(Number).filter(Number.isFinite);
+    if (!ids.length) return { ok: false };
+    const gen = beginQueueWrite();
+    const before = snapshotQueue(getData());
+    const survivors = withoutSongs(before.queueSongs, ids);
+    const removedCount = before.queueSongs.length - survivors.length;
+    patch({ queueSongs: survivors, queueMeta: before.queueMeta });
+    repaintQueueButtonsNow();
+    notifyQueueViews();
+    notify(`\u5DF2\u4ECE\u64AD\u653E\u5217\u8868\u79FB\u9664 ${removedCount} \u9996`, "ok");
+    try {
+      const r = await api.queueRemove(ids);
+      if (!r || !r.ok) {
+        rollbackQueue(before, gen);
+        notify(r && r.error || "\u79FB\u9664\u5931\u8D25\uFF0C\u5DF2\u6062\u590D\u5217\u8868", "err");
+        return r || { ok: false, error: "\u79FB\u9664\u5931\u8D25" };
+      }
+      await reloadQueueIfCurrent(gen);
       return r;
     } catch (e) {
-      notify(String(e), "err");
+      rollbackQueue(before, gen);
+      notify("\u79FB\u9664\u5931\u8D25\uFF0C\u5DF2\u6062\u590D\u5217\u8868", "err");
       return { ok: false, error: String(e) };
+    } finally {
+      queueWrites.end();
     }
   }
   async function clearQueue() {
@@ -1348,34 +1864,55 @@
       danger: true
     });
     if (!ok) return;
+    const gen = beginQueueWrite();
+    const before = snapshotQueue(getData());
     try {
       const r = await api.queueClear();
       if (!r.ok) {
         notify(r.error || "\u6E05\u7A7A\u5931\u8D25", "err");
         return;
       }
-      patch({ queueSongs: [], queueMeta: getData().queueMeta });
+      patch({ queueSongs: [], queueMeta: before.queueMeta });
       notify(`\u5DF2\u6E05\u7A7A ${r.removed} \u9996`, "ok");
-      await reloadQueue();
+      repaintQueueButtonsNow();
+      notifyQueueViews();
+      await reloadQueueIfCurrent(gen);
     } catch (e) {
+      rollbackQueue(before, gen);
       notify(String(e), "err");
+    } finally {
+      queueWrites.end();
     }
   }
   async function removePlayed() {
+    const before = snapshotQueue(getData());
+    const played = playedSongs(before.queueSongs);
+    if (!played.length) {
+      notify("\u6CA1\u6709\u5DF2\u542C\u5B8C\u7684\u8282\u76EE", "muted");
+      return;
+    }
+    const gen = beginQueueWrite();
+    const drop = new Set(played.map((s) => s.id));
+    patch({
+      queueSongs: before.queueSongs.filter((s) => !drop.has(s.id)),
+      queueMeta: before.queueMeta
+    });
+    repaintQueueButtonsNow();
+    notifyQueueViews();
+    notify(`\u5DF2\u79FB\u9664 ${drop.size} \u9996\u5DF2\u542C\u5B8C\u7684\u8282\u76EE`, "ok");
     try {
       const r = await api.queueRemovePlayed();
-      if (!r.ok) {
-        notify(r.error || "\u79FB\u9664\u5DF2\u64AD\u653E\u5931\u8D25", "err");
+      if (!r || !r.ok) {
+        rollbackQueue(before, gen);
+        notify(r && r.error || "\u79FB\u9664\u5DF2\u64AD\u653E\u5931\u8D25\uFF0C\u5DF2\u6062\u590D\u5217\u8868", "err");
         return;
       }
-      if (!r.removed) {
-        notify("\u6CA1\u6709\u5DF2\u542C\u5B8C\u7684\u8282\u76EE", "muted");
-        return;
-      }
-      notify(`\u5DF2\u79FB\u9664 ${r.removed} \u9996\u5DF2\u542C\u5B8C\u7684\u8282\u76EE`, "ok");
-      await reloadQueue();
+      await reloadQueueIfCurrent(gen);
     } catch (e) {
-      notify(String(e), "err");
+      rollbackQueue(before, gen);
+      notify("\u79FB\u9664\u5DF2\u64AD\u653E\u5931\u8D25\uFF0C\u5DF2\u6062\u590D\u5217\u8868", "err");
+    } finally {
+      queueWrites.end();
     }
   }
   async function replaceQueueAndPlay2() {
@@ -1384,29 +1921,54 @@
       notify("\u64AD\u653E\u5217\u8868\u4E3A\u7A7A", "warn");
       return;
     }
+    if (!hasSetQueue()) {
+      notify(SET_QUEUE_UNAVAILABLE, "err");
+      return;
+    }
     const ok = await uiConfirm({
-      title: "\u66FF\u6362\u5E76\u64AD\u653E",
-      message: "\u5C06\u7528\u300C\u64AD\u5BA2\u300D\u6B4C\u5355\u66FF\u6362\u5BBF\u4E3B\u5F53\u524D\u64AD\u653E\u961F\u5217\u5E76\u5F00\u59CB\u64AD\u653E\uFF0C\u73B0\u6709\u961F\u5217\u4F1A\u88AB\u8986\u76D6\u3002",
-      okText: "\u66FF\u6362\u5E76\u64AD\u653E"
+      title: PLAY_FROM_START_TITLE,
+      message: PLAY_FROM_START_MESSAGE,
+      okText: PLAY_FROM_START_OK
     });
     if (!ok) return;
     try {
-      await replaceQueueAndPlay(
-        data2.queueSongs.map((s) => s.id),
-        0
-      );
-      notify("\u5DF2\u66FF\u6362\u5BBF\u4E3B\u961F\u5217\u5E76\u5F00\u59CB\u64AD\u653E", "ok");
+      await ensureSequentialPlayMode();
+      const { ids } = queueIdsForStart(getData().queueSongs, null);
+      if (!ids.length) {
+        notify("\u64AD\u653E\u5217\u8868\u91CC\u8FD8\u6CA1\u6709\u53EF\u64AD\u653E\u7684\u5355\u96C6", "warn");
+        return;
+      }
+      const playlistId = data2.queueMeta && data2.queueMeta.playlistId;
+      await replaceQueueAndPlay(ids, 0, { sourcePlaylistId: playlistId });
+      const first = (getData().queueSongs || []).find((s) => episodeSongId(s) === ids[0]) || getData().queueSongs[0];
+      notify(`\u6B63\u5728\u64AD\u653E\u300C${first && first.title || "\u5F53\u524D\u5355\u96C6"}\u300D`, "ok");
     } catch (e) {
       notify(String(e), "err");
     }
   }
   async function reorderQueue(songIds) {
+    const ids = (Array.isArray(songIds) ? songIds : []).map(Number).filter(Number.isFinite);
+    if (!ids.length) return;
+    const gen = beginQueueWrite();
+    const before = snapshotQueue(getData());
+    patch({
+      queueSongs: reorderSongs(before.queueSongs, ids),
+      queueMeta: before.queueMeta
+    });
+    notifyQueueViews();
     try {
-      const r = await api.queueReorder(songIds);
-      if (!r.ok) notify(r.error || "\u6392\u5E8F\u5931\u8D25", "err");
-      await reloadQueue();
+      const r = await api.queueReorder(ids);
+      if (!r || !r.ok) {
+        rollbackQueue(before, gen);
+        notify(r && r.error || "\u6392\u5E8F\u5931\u8D25\uFF0C\u5DF2\u6062\u590D\u5217\u8868", "err");
+        return;
+      }
+      await reloadQueueIfCurrent(gen);
     } catch (e) {
-      notify(String(e), "err");
+      rollbackQueue(before, gen);
+      notify("\u6392\u5E8F\u5931\u8D25\uFF0C\u5DF2\u6062\u590D\u5217\u8868", "err");
+    } finally {
+      queueWrites.end();
     }
   }
 
@@ -1817,23 +2379,22 @@
     const showDate = opts.showDate !== false && dateMs && Number.isFinite(dateMs);
     const playIcon = isCurrent && snap.phase === "playing" ? "pause" : "play";
     const lead = opts.leadHtml || "";
+    const pending = !!opts.pending;
     const headGrid = lead ? "ep-head q-head" : "ep-head";
     const channelAttr = opts.channelLink ? `data-channel-tap data-idx="${idx}"` : "";
-    const cover = opts.channelLink ? `<button type="button" class="cover-btn" ${channelAttr} title="\u67E5\u770B\u9891\u9053">` + coverHtml(ep.coverUrl, ep.title || ep.showTitle) + `</button>` : coverHtml(ep.coverUrl, ep.title || ep.showTitle);
+    const art = opts.coverHtml || coverHtml(ep.coverUrl, ep.title || ep.showTitle);
+    const cover = opts.channelLink ? `<button type="button" class="cover-btn" ${channelAttr} title="\u67E5\u770B\u9891\u9053">` + art + `</button>` : art;
     const showName = ep.showTitle ? opts.channelLink ? `<button type="button" class="channel-link" ${channelAttr}>${escapeHtml(ep.showTitle)}</button>` : `<span>${escapeHtml(ep.showTitle)}</span>` : "";
     const actions = (opts.actions || []).map(
       (a) => `<button type="button" class="icon-btn ${a.cls || ""}" data-act="${a.act}" data-idx="${idx}" title="${escapeHtml(a.title)}" ${a.attrs || ""}>${icon(a.iconName, 17)}</button>`
     ).join("");
-    return `<div class="ep-row${isCurrent ? " is-current" : ""}${opts.extraClass ? " " + opts.extraClass : ""}" data-row data-idx="${idx}" ${rowDataset(ep)}><div class="${headGrid}">` + lead + cover + `<div><button type="button" class="ep-title--tap" data-title-tap data-idx="${idx}" title="\u67E5\u770B\u8BE6\u60C5">${escapeHtml(ep.title || "\u672A\u547D\u540D")}</button><div class="meta-line">` + showName + `<span data-now-badge ${isCurrent && label ? "" : "hidden"}>${escapeHtml(isCurrent ? label : "")}</span><span data-prog-slot>${progressBadgeHtml(prog, ep.durationSec)}</span>` + (showDate ? `<span class="hide-sm">${escapeHtml(fmtTime(dateMs))}</span>` : "") + `</div></div></div><div class="actions-row"><button type="button" class="icon-btn icon-btn--play" data-play-btn data-idx="${idx}" title="\u64AD\u653E">${icon(playIcon, 17)}</button>` + actions + (opts.moreHtml || "") + `</div></div>`;
+    return `<div class="ep-row${isCurrent ? " is-current" : ""}${pending ? " is-pending" : ""}${opts.extraClass ? " " + opts.extraClass : ""}" data-row data-idx="${idx}" ${pending ? 'aria-busy="true" ' : ""}${rowDataset(ep)}><div class="${headGrid}">` + lead + cover + `<div><button type="button" class="ep-title--tap" data-title-tap data-idx="${idx}" title="\u67E5\u770B\u8BE6\u60C5">${escapeHtml(ep.title || "\u672A\u547D\u540D")}</button><div class="meta-line">` + showName + (pending ? `<span class="q-pending">\u6B63\u5728\u52A0\u5165\u2026</span>` : `<span data-now-badge ${isCurrent && label ? "" : "hidden"}>${escapeHtml(isCurrent ? label : "")}</span><span data-prog-slot>${progressBadgeHtml(prog, ep.durationSec)}</span>` + (showDate ? `<span class="hide-sm">${escapeHtml(fmtTime(dateMs))}</span>` : "")) + `</div></div></div><div class="actions-row"><button type="button" class="icon-btn icon-btn--play" data-play-btn data-idx="${idx}" title="${playButtonLabel({ isCurrent, phase: snap.phase, pending })}" aria-label="${playButtonLabel({ isCurrent, phase: snap.phase, pending })}"${pending ? " disabled" : ""}>${pending ? '<span class="q-spinner" aria-hidden="true"></span>' : icon(playIcon, 17)}</button>` + actions + (opts.moreHtml || "") + `</div></div>`;
   }
   function moreMenuHtml(items, wrapKey) {
     const body = items.map((it) => {
-      if (it.disabled) {
-        return `<button type="button" disabled>` + (it.iconName ? icon(it.iconName, 15) : "") + `<span>${escapeHtml(it.label)}</span></button>`;
-      }
-      return `<button type="button" class="${it.danger ? "danger-text" : ""}" data-more-act="${escapeHtml(
-        it.key
-      )}" ${it.attrs || ""}>` + (it.iconName ? icon(it.iconName, 15) : "") + `<span>${escapeHtml(it.label)}</span></button>`;
+      const label = escapeHtml(it.label);
+      const cls = it.danger ? "danger-text" : "";
+      return `<button type="button" class="${cls}" data-more-act="${escapeHtml(it.key)}" title="${label}" ${it.attrs || ""}>` + (it.iconName ? icon(it.iconName, 15) : "") + `<span>${label}</span></button>`;
     }).join("");
     return `<div class="more-wrap" data-more-wrap="${escapeHtml(String(wrapKey))}"><button type="button" class="icon-btn" data-more-toggle title="\u66F4\u591A">${icon("moreHorizontal", 17)}</button><div class="more-menu">${body}</div></div>`;
   }
@@ -1860,8 +2421,11 @@
       const playBtn = row.querySelector("[data-play-btn]");
       if (playBtn) {
         const iconName = isCurrent && current.phase === "playing" ? "pause" : "play";
-        playBtn.innerHTML = icon(iconName, 17);
-        playBtn.title = isCurrent && current.phase === "playing" ? "\u6682\u505C" : isCurrent ? "\u7EE7\u7EED" : "\u64AD\u653E";
+        const pending = row.classList.contains("is-pending");
+        const label2 = playButtonLabel({ isCurrent, phase: current.phase, pending });
+        if (!pending) playBtn.innerHTML = icon(iconName, 17);
+        playBtn.title = label2;
+        playBtn.setAttribute("aria-label", label2);
       }
       const slot = row.querySelector("[data-prog-slot]");
       if (!slot) return;
@@ -1920,7 +2484,7 @@
   function escapeText(value) {
     return String(value).replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
-  function escapeAttr(value) {
+  function escapeAttr2(value) {
     return String(value).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
   function readAttr(attrs, name) {
@@ -1974,7 +2538,7 @@
         const src = readAttr(part.attrs, "src");
         if (!isSafeHttpUrl(src)) continue;
         const alt = readAttr(part.attrs, "alt");
-        out.push(`<img src="${escapeAttr(src.trim())}" alt="${escapeAttr(alt)}" loading="lazy" />`);
+        out.push(`<img src="${escapeAttr2(src.trim())}" alt="${escapeAttr2(alt)}" loading="lazy" />`);
         continue;
       }
       if (name === "a") {
@@ -1984,7 +2548,7 @@
           continue;
         }
         out.push(
-          `<a href="${escapeAttr(href.trim())}" target="_blank" rel="noopener noreferrer nofollow">`
+          `<a href="${escapeAttr2(href.trim())}" target="_blank" rel="noopener noreferrer nofollow">`
         );
         continue;
       }
@@ -1994,6 +2558,55 @@
   }
   function looksLikeHtml(value) {
     return /<[a-z][^>]*>/i.test(String(value || ""));
+  }
+
+  // ui/lib/shownoteActions.js
+  var SHOWNNOTE_FOOT_CLASS = "modal__foot--episode-actions";
+  function shownoteFootActions(ep) {
+    const favorited = !!(ep && ep.favorited);
+    return [
+      {
+        key: "play",
+        label: "\u64AD\u653E",
+        shortLabel: "\u64AD\u653E",
+        ariaLabel: "\u4ECE\u8FD9\u4E00\u96C6\u5F00\u59CB\uFF0C\u6309\u64AD\u653E\u5217\u8868\u987A\u5E8F\u7EE7\u7EED",
+        title: "\u4ECE\u8FD9\u4E00\u96C6\u5F00\u59CB\uFF0C\u6309\u64AD\u653E\u5217\u8868\u987A\u5E8F\u7EE7\u7EED",
+        kind: "primary",
+        iconName: "play",
+        close: true
+      },
+      {
+        key: "queue",
+        label: "\u52A0\u5165\u64AD\u653E\u5217\u8868",
+        shortLabel: "\u52A0\u5165\u5217\u8868",
+        ariaLabel: "\u52A0\u5165\u64AD\u653E\u5217\u8868",
+        title: "\u52A0\u5165\u64AD\u653E\u5217\u8868",
+        kind: "tonal",
+        iconName: "listPlus",
+        close: true
+      },
+      {
+        key: "cast",
+        label: "\u6295\u653E\u5230\u97F3\u7BB1",
+        shortLabel: "\u6295\u653E",
+        ariaLabel: "\u6295\u653E\u5230\u97F3\u7BB1",
+        title: "\u6295\u653E\u5230\u97F3\u7BB1",
+        kind: "ghost",
+        iconName: "speaker",
+        close: true
+      },
+      {
+        key: "favorite",
+        label: favorited ? "\u53D6\u6D88\u6536\u85CF" : "\u6536\u85CF",
+        shortLabel: favorited ? "\u5DF2\u6536\u85CF" : "\u6536\u85CF",
+        ariaLabel: favorited ? "\u53D6\u6D88\u6536\u85CF" : "\u6536\u85CF",
+        title: favorited ? "\u53D6\u6D88\u6536\u85CF" : "\u6536\u85CF",
+        ariaPressed: favorited,
+        kind: "ghost",
+        iconName: "star",
+        close: true
+      }
+    ];
   }
 
   // ui/views/show-note.js
@@ -2027,39 +2640,30 @@
     const safeNote = hasNote ? looksLikeHtml(note) ? sanitizeShowNote(note) : `<p>${escapeHtml(note).replace(/\n{2,}/g, "</p><p>").replace(/\n/g, "<br />")}</p>` : `<p class="muted">\u6682\u65E0 ShowNote\u3002\u53EF\u5728\u300C\u8BA2\u9605\u300D\u4E2D\u5237\u65B0\u8BE5\u8282\u76EE\u540E\u518D\u8BD5\u3002</p>`;
     const html = `<div class="sn-head"><div class="sn-meta">${escapeHtml(metaLine(ep))}</div><div class="sn-title">${escapeHtml(ep.title || "ShowNote")}</div></div><div class="sn-body" id="snBody">` + safeNote + `</div>`;
     body.innerHTML = html;
+    const [playAct, queueAct, castAct, favAct] = shownoteFootActions(ep);
     openModal({
       title: "",
       body,
       size: "wide",
+      footClass: SHOWNNOTE_FOOT_CLASS,
       actions: [
         {
-          label: "\u64AD\u653E",
-          kind: "primary",
-          iconName: "play",
-          close: true,
+          ...playAct,
           onClick: () => {
             playEpisode(episodePayload(ep));
           }
         },
         {
-          label: "\u52A0\u5165\u64AD\u653E\u5217\u8868",
-          kind: "tonal",
-          iconName: "listPlus",
+          ...queueAct,
           close: true,
           onClick: () => addToQueue(ep)
         },
         {
-          label: "\u6295\u653E\u5230\u97F3\u7BB1",
-          kind: "ghost",
-          iconName: "speaker",
-          close: true,
+          ...castAct,
           onClick: () => castToSpeaker(ep.songId, { prepareIfMissing: ep })
         },
         {
-          label: ep.favorited ? "\u53D6\u6D88\u6536\u85CF" : "\u6536\u85CF",
-          kind: "ghost",
-          iconName: "star",
-          close: true,
+          ...favAct,
           onClick: () => toggleFavorite(ep, null)
         }
       ]
@@ -2241,7 +2845,8 @@
   // ui/views/row-events.js
   async function defaultPlayToggle(ep, row, items) {
     const snap = get();
-    const isCurrent = ep.songId != null && snap.current && snap.current.songId === ep.songId;
+    const songId = episodeSongId(ep);
+    const isCurrent = songId != null && snap.current && snap.current.songId === songId;
     if (isCurrent && snap.phase === "playing") {
       try {
         await pause();
@@ -2251,8 +2856,8 @@
       }
       return;
     }
-    if (ep.songId != null) {
-      await playEpisode({ ...episodePayload(ep), songId: ep.songId, showTitle: ep.showTitle }, { resume: true });
+    if (songId != null) {
+      await playEpisode({ ...episodePayload(ep), songId, showTitle: ep.showTitle }, { resume: true });
     } else {
       await playEpisode(episodePayload(ep));
     }
@@ -2300,7 +2905,7 @@
         ev.stopPropagation();
         closePopovers();
         if (handlers[act]) return handlers[act](ep, idx, btn);
-        if (act === "queue") await addToQueue(ep);
+        if (act === "queue") await addToQueue(ep, btn);
         else if (act === "fav") await toggleFavorite(ep, btn);
       });
     });
@@ -2322,7 +2927,7 @@
         const ep = Number.isFinite(idx) ? items[idx] : null;
         closePopovers();
         if (!ep) return;
-        if (act === "queue") await addToQueue(ep);
+        if (act === "queue") await addToQueue(ep, btn);
         else if (act === "cast") await castToSpeaker(ep.songId, { prepareIfMissing: ep });
         else if (act === "fav") await toggleFavorite(ep, null);
       });
@@ -2330,10 +2935,32 @@
   }
 
   // ui/views/recent.js
-  function actionsFor(ep, idx) {
+  function recentListSignature(items) {
+    if (!Array.isArray(items) || !items.length) return "empty";
+    return items.map((ep) => {
+      const prog = ep && ep.progress || {};
+      return [
+        ep && ep.feedUrl || "",
+        ep && ep.guid || "",
+        ep && ep.title || "",
+        ep && ep.favorited ? "1" : "0",
+        ep && ep.coverUrl || "",
+        prog.completed ? "1" : "0",
+        prog.positionSec || 0,
+        ep && (ep.pubDateMs || ep.pubDate) || ""
+      ].join("	");
+    }).join("\n");
+  }
+  function actionsFor(ep, idx, index) {
+    const queueState = queueButtonState(ep, index);
     return moreMenuHtml(
       [
-        { key: "queue", label: "\u52A0\u5165\u64AD\u653E\u5217\u8868", iconName: "listPlus", attrs: `data-idx="${idx}"` },
+        {
+          key: "queue",
+          label: queueState.label,
+          iconName: queueState.iconName,
+          attrs: queueMenuAttrs(ep, index, idx)
+        },
         { key: "cast", label: "\u6295\u653E\u5230\u97F3\u7BB1", iconName: "speaker", attrs: `data-idx="${idx}"` }
       ],
       "recent-" + idx
@@ -2343,10 +2970,14 @@
     const box = $("recentList");
     if (!box) return;
     const items = getData().recent || [];
+    const sig = recentListSignature(items);
+    if (box.dataset.renderSig === sig) return;
+    box.dataset.renderSig = sig;
     if (!items.length) {
       box.innerHTML = '<div class="empty">\u8FD8\u6CA1\u6709\u66F4\u65B0\u3002\u5148\u5728\u300C\u8BA2\u9605\u300D\u91CC\u6DFB\u52A0\u9891\u9053\u3002</div>';
       return;
     }
+    const queueIndex = buildQueueIndex(getData().queueSongs);
     const groups = /* @__PURE__ */ new Map();
     items.forEach((ep, idx) => {
       const ms = ep.pubDateMs || (ep.pubDate ? Date.parse(ep.pubDate) : 0);
@@ -2355,15 +2986,18 @@
       groups.get(key).push({ ep, idx });
     });
     box.innerHTML = Array.from(groups.entries()).map(([label, rows]) => {
-      const cards = rows.map(
-        ({ ep, idx }) => episodeRowHtml(ep, idx, {
+      const cards = rows.map(({ ep, idx }) => {
+        const queueState = queueButtonState(ep, queueIndex);
+        return episodeRowHtml(ep, idx, {
           showDate: false,
           channelLink: true,
           actions: [
             {
               act: "queue",
-              iconName: "listPlus",
-              title: "\u52A0\u5165\u64AD\u653E\u5217\u8868"
+              iconName: queueState.iconName,
+              title: queueState.label,
+              cls: queueState.inQueue ? "is-in-queue" : "",
+              attrs: queueButtonAttrs(ep, queueIndex)
             },
             {
               act: "fav",
@@ -2373,12 +3007,21 @@
               attrs: `aria-pressed="${ep.favorited ? "true" : "false"}"`
             }
           ],
-          moreHtml: actionsFor(ep, idx)
-        })
-      ).join("");
+          moreHtml: actionsFor(ep, idx, queueIndex)
+        });
+      }).join("");
       return `<div class="date-group"><div class="date-label">${escapeHtml(label)}</div>` + cards + `</div>`;
     }).join("");
     bindRowInteractions(box, items);
+  }
+  var unbindQueueRepaint = null;
+  function bindRecentQueueState() {
+    if (unbindQueueRepaint) return;
+    unbindQueueRepaint = onQueueChange((index) => {
+      const box = $("recentList");
+      if (!box) return;
+      repaintQueueButtons(box, index);
+    });
   }
   function bindRecentToolbar() {
     const btn = $("btnRecentRefresh");
@@ -2422,10 +3065,17 @@
       syncClearButton();
       return;
     }
+    const queueIndex = buildQueueIndex(getData().queueSongs);
     box.innerHTML = items.map((ep, idx) => {
+      const queueState = queueButtonState(ep, queueIndex);
       const more = moreMenuHtml(
         [
-          { key: "queue", label: "\u52A0\u5165\u64AD\u653E\u5217\u8868", iconName: "listPlus", attrs: `data-idx="${idx}"` },
+          {
+            key: "queue",
+            label: queueState.label,
+            iconName: queueState.iconName,
+            attrs: queueMenuAttrs(ep, queueIndex, idx)
+          },
           { key: "cast", label: "\u6295\u653E\u5230\u97F3\u7BB1", iconName: "speaker", attrs: `data-idx="${idx}"` },
           { key: "unfav", label: "\u53D6\u6D88\u6536\u85CF", iconName: "star", danger: true, attrs: `data-idx="${idx}"` }
         ],
@@ -2434,7 +3084,15 @@
       return episodeRowHtml(ep, idx, {
         showDate: false,
         channelLink: true,
-        actions: [{ act: "queue", iconName: "listPlus", title: "\u52A0\u5165\u64AD\u653E\u5217\u8868" }],
+        actions: [
+          {
+            act: "queue",
+            iconName: queueState.iconName,
+            title: queueState.label,
+            cls: queueState.inQueue ? "is-in-queue" : "",
+            attrs: queueButtonAttrs(ep, queueIndex)
+          }
+        ],
         moreHtml: more
       });
     }).join("");
@@ -2450,6 +3108,15 @@
   function syncClearButton() {
     const clear = $("favSearchClear");
     if (clear) clear.classList.toggle("hidden", !query.trim());
+  }
+  var unbindQueueRepaint2 = null;
+  function bindFavoritesQueueState() {
+    if (unbindQueueRepaint2) return;
+    unbindQueueRepaint2 = onQueueChange((index) => {
+      const box = $("favList");
+      if (!box) return;
+      repaintQueueButtons(box, index);
+    });
   }
   function bindFavoritesToolbar() {
     const input = $("favSearch");
@@ -2863,20 +3530,23 @@
     }
     const box = $("queueList");
     if (!box) return;
+    const replaceBtn = document.querySelector('[data-queue-act="replace"]');
+    if (replaceBtn) replaceBtn.disabled = !songs.length;
     if (!songs.length) {
       box.innerHTML = '<div class="empty">\u64AD\u653E\u5217\u8868\u4E3A\u7A7A\u3002\u5728\u300C\u66F4\u65B0\u300D\u91CC\u52A0\u5165\u5355\u96C6\u3002</div>';
       syncSelectUi();
       return;
     }
     box.innerHTML = songs.map((s, idx) => {
+      const pending = !!s.pending;
       const selected = selectState.ids.has(s.id);
-      const lead = selectState.mode ? `<input type="checkbox" class="sel-box" data-sel="${s.id}" ${selected ? "checked" : ""} aria-label="\u9009\u62E9" />` : `<span class="drag-handle" title="\u62D6\u62FD\u6392\u5E8F" aria-hidden="true">${icon("gripVertical", 16)}</span>`;
-      const more = moreMenuHtml(
+      const lead = pending ? `<span class="q-pending-lead" aria-hidden="true"></span>` : selectState.mode ? `<input type="checkbox" class="sel-box" data-sel="${s.id}" ${selected ? "checked" : ""} aria-label="\u9009\u62E9" />` : `<span class="drag-handle" title="\u62D6\u62FD\u6392\u5E8F" aria-hidden="true">${icon("gripVertical", 16)}</span>`;
+      const more = pending ? "" : moreMenuHtml(
         [
           { key: "cast", label: "\u6295\u653E\u5230\u97F3\u7BB1", iconName: "speaker", attrs: `data-idx="${idx}"` },
           {
             key: "remove",
-            label: "\u4ECE\u64AD\u653E\u5217\u8868\u79FB\u9664",
+            label: "\u79FB\u51FA\u5217\u8868",
             iconName: "trash",
             danger: true,
             attrs: `data-idx="${idx}"`
@@ -2895,6 +3565,7 @@
         {
           showDate: false,
           extraClass: "q-row",
+          pending,
           leadHtml: lead,
           actions: [
             {
@@ -2902,10 +3573,10 @@
               iconName: "star",
               title: "\u6536\u85CF",
               cls: "icon-btn--star",
-              attrs: `aria-pressed="${s.favorited ? "true" : "false"}" ` + (s.feedUrl && s.guid ? "" : "disabled")
+              attrs: `aria-pressed="${s.favorited ? "true" : "false"}" ` + (pending || !(s.feedUrl && s.guid) ? "disabled" : "")
             }
           ],
-          moreHtml: selectState.mode ? "" : more
+          moreHtml: pending || selectState.mode ? "" : more
         }
       );
       return row;
@@ -3028,6 +3699,8 @@
     await reorderQueue(next);
   }
   function bindQueuePanel() {
+    onQueueViewChange(() => renderQueue());
+    onEnsureQueueVisible(() => setQueueOpen(true));
     const panel = $("queuePanel");
     const backdrop = $("queueBackdrop");
     if (backdrop) backdrop.addEventListener("click", () => setQueueOpen(false));
@@ -3263,11 +3936,362 @@
     if (reloadLog) reloadLog.addEventListener("click", () => loadLog());
   }
 
+  // ui/lib/episodeMeta.js
+  function isPlaceholderTitle(title) {
+    const t = String(title || "").trim();
+    return !t || t === "Untitled";
+  }
+  function normalizeFeedUrl(raw) {
+    const t = String(raw || "").trim();
+    if (!t) return "";
+    try {
+      const u = new URL(t);
+      u.hash = "";
+      if (u.pathname.length > 1 && u.pathname.endsWith("/")) {
+        u.pathname = u.pathname.replace(/\/+$/, "");
+      }
+      return u.toString();
+    } catch {
+      return t;
+    }
+  }
+  function episodeStorageKey(feedUrl, guid) {
+    return `${normalizeFeedUrl(feedUrl)}::${String(guid || "").trim()}`;
+  }
+  function findEpisodeMeta(subs, feedUrl, guid) {
+    const key = episodeStorageKey(feedUrl, guid);
+    if (!guid || key.startsWith("::")) return null;
+    for (const sub of Array.isArray(subs) ? subs : []) {
+      if (!sub) continue;
+      const subUrl = sub.url || sub.feedUrl || "";
+      for (const ep of sub.episodes || []) {
+        if (!ep) continue;
+        const epGuid = String(ep.guid || "").trim();
+        if (!epGuid) continue;
+        if (episodeStorageKey(subUrl, epGuid) !== key) continue;
+        const title = !isPlaceholderTitle(ep.title) ? String(ep.title).trim() : void 0;
+        return {
+          title,
+          showTitle: sub.title && String(sub.title).trim() ? String(sub.title).trim() : void 0,
+          coverUrl: typeof ep.coverUrl === "string" && ep.coverUrl ? ep.coverUrl : null,
+          durationSec: ep.durationSec ?? null,
+          subscriptionId: sub.id,
+          dedupKey: ep.dedupKey
+        };
+      }
+    }
+    return null;
+  }
+  function enrichHistoryEntry(entry, subs) {
+    if (!entry) return entry;
+    const meta = findEpisodeMeta(subs, entry.feedUrl, entry.guid);
+    if (!meta) return entry;
+    const next = { ...entry };
+    if (isPlaceholderTitle(next.title) && meta.title) next.title = meta.title;
+    if (!(next.showTitle && String(next.showTitle).trim()) && meta.showTitle) {
+      next.showTitle = meta.showTitle;
+    }
+    if (!next.coverUrl && meta.coverUrl) next.coverUrl = meta.coverUrl;
+    if ((next.durationSec == null || next.durationSec <= 0) && meta.durationSec) {
+      next.durationSec = meta.durationSec;
+    }
+    return next;
+  }
+
+  // ui/lib/historyCover.js
+  var HISTORY_COVER_TIMEOUT_MS = 8e3;
+  var HISTORY_COVER_ROOT_MARGIN = "80px";
+  function channelCoverFromSubs(feedUrl, subs) {
+    const target = normalizeFeedLookup(feedUrl);
+    if (!target || !Array.isArray(subs)) return null;
+    for (const sub of subs) {
+      const u = normalizeFeedLookup(sub && (sub.url || sub.feedUrl));
+      if (u && u === target) {
+        const abs = absoluteCoverUrl(sub.coverUrl);
+        return abs || null;
+      }
+    }
+    return null;
+  }
+  function normalizeFeedLookup(url) {
+    return String(url || "").trim().replace(/\/+$/, "").toLowerCase();
+  }
+  function letterPlaceholderSource(showTitle, title) {
+    const show = String(showTitle || "").trim();
+    if (show) return show;
+    const ep = String(title || "").trim();
+    if (ep) return ep;
+    return "?";
+  }
+  function historyCoverCandidates(input) {
+    const out = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const raw of [input && input.coverUrl, input && input.channelCoverUrl]) {
+      const abs = absoluteCoverUrl(raw);
+      if (!abs || seen.has(abs)) continue;
+      seen.add(abs);
+      out.push(abs);
+    }
+    return out;
+  }
+  function historyCoverHtml(entry, opts = {}) {
+    const candidates = historyCoverCandidates({
+      coverUrl: entry && entry.coverUrl,
+      channelCoverUrl: opts.channelCoverUrl
+    });
+    const letterSrc = letterPlaceholderSource(entry && entry.showTitle, entry && entry.title);
+    const letter = letterSrc.trim().charAt(0).toUpperCase() || "?";
+    const color = colorFromString(letterSrc === "?" ? "" : letterSrc);
+    const ph = `<div class="cover-ph" style="background:${color}" aria-hidden="true">${escapeHtml(letter)}</div>`;
+    if (!candidates.length) return ph;
+    return `<img class="ep-cover" src="${escapeHtml(candidates[0])}" alt="" loading="lazy" data-history-cover="1" data-cover-candidates="${escapeHtml(JSON.stringify(candidates))}" data-cover-letter="${escapeHtml(letter)}" data-cover-color="${escapeHtml(color)}" />`;
+  }
+  function uniqueAbsolute(urls) {
+    const out = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const raw of urls) {
+      const abs = absoluteCoverUrl(raw);
+      if (!abs || seen.has(abs)) continue;
+      seen.add(abs);
+      out.push(abs);
+    }
+    return out;
+  }
+  function historyCoverReduce(session, event) {
+    if (!session || session.cancelled) {
+      return { session, action: { type: "ignore" } };
+    }
+    if (event.generation != null && event.generation !== session.generation) {
+      return { session, action: { type: "ignore" } };
+    }
+    if (event.type === "cancel") {
+      return { session: { ...session, cancelled: true }, action: { type: "cleanup" } };
+    }
+    if (event.type === "load") {
+      return { session: { ...session, cancelled: true }, action: { type: "keep" } };
+    }
+    if (event.type === "error" || event.type === "timeout") {
+      const next = session.index + 1;
+      if (next >= session.candidates.length) {
+        return {
+          session: { ...session, cancelled: true, index: next },
+          action: { type: "placeholder" }
+        };
+      }
+      return {
+        session: { ...session, index: next },
+        action: { type: "set-src", url: session.candidates[next] }
+      };
+    }
+    return { session, action: { type: "ignore" } };
+  }
+  function historyCoverImageState(img, opts = {}) {
+    if (!img) return "pending";
+    if ((Number(img.naturalWidth) || 0) > 0) return "loaded";
+    if (!isCoverEligibleToLoad(img, opts)) return "pending";
+    return "pending";
+  }
+  function isLazyCoverLoading(img) {
+    const loading = img && img.loading != null ? img.loading : img && typeof img.getAttribute === "function" ? img.getAttribute("loading") : "";
+    return String(loading || "").toLowerCase() === "lazy";
+  }
+  function isCoverEligibleToLoad(img, opts) {
+    if (opts && opts.eligible === true) return true;
+    if (opts && opts.eligible === false) return false;
+    return !isLazyCoverLoading(img);
+  }
+  function bindHistoryCoverRoot(root, opts = {}) {
+    const timeoutMs = opts.timeoutMs || HISTORY_COVER_TIMEOUT_MS;
+    const rootMargin = opts.rootMargin || HISTORY_COVER_ROOT_MARGIN;
+    if (!root || typeof root.querySelectorAll !== "function") return () => {
+    };
+    const cleanups = [];
+    const waiters = /* @__PURE__ */ new WeakMap();
+    const Observer = typeof IntersectionObserver === "function" ? IntersectionObserver : null;
+    const observer = Observer ? new Observer(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry || !entry.isIntersecting || !entry.target) continue;
+          const fn = waiters.get(entry.target);
+          if (!fn) continue;
+          waiters.delete(entry.target);
+          try {
+            observer.unobserve(entry.target);
+          } catch {
+          }
+          try {
+            fn();
+          } catch {
+          }
+        }
+      },
+      { rootMargin }
+    ) : null;
+    root.querySelectorAll("[data-history-cover]").forEach((img) => {
+      cleanups.push(attachHistoryCover(img, timeoutMs, { observer, waiters }));
+    });
+    return () => {
+      if (observer) {
+        try {
+          observer.disconnect();
+        } catch {
+        }
+      }
+      for (const fn of cleanups) {
+        try {
+          fn();
+        } catch {
+        }
+      }
+    };
+  }
+  function attachHistoryCover(img, timeoutMs, io) {
+    let candidates = [];
+    try {
+      candidates = uniqueAbsolute(JSON.parse(img.getAttribute("data-cover-candidates") || "[]"));
+    } catch {
+      candidates = uniqueAbsolute([img.getAttribute("src")]);
+    }
+    const generation = Date.now() + Math.random();
+    img.setAttribute("data-cover-gen", String(generation));
+    let session = {
+      candidates,
+      generation,
+      index: 0,
+      cancelled: false,
+      timeoutMs
+    };
+    let timer2 = null;
+    const stopTimer = () => {
+      if (timer2 != null) {
+        clearTimeout(timer2);
+        timer2 = null;
+      }
+    };
+    let eligible = !isLazyCoverLoading(img);
+    let decodeToken = 0;
+    const apply = (event) => {
+      const result = historyCoverReduce(session, event);
+      session = result.session;
+      const action = result.action;
+      if (action.type === "ignore" || action.type === "keep") {
+        if (action.type === "keep") stopTimer();
+        return;
+      }
+      if (action.type === "cleanup") {
+        stopTimer();
+        return;
+      }
+      if (action.type === "set-src") {
+        stopTimer();
+        if (img && img.getAttribute("data-cover-gen") === String(generation)) {
+          img.src = action.url;
+          settleOrArm();
+        }
+        return;
+      }
+      if (action.type === "placeholder") {
+        stopTimer();
+        replaceWithPlaceholder(img, generation);
+      }
+    };
+    const onLoad = () => apply({ type: "load", generation });
+    const onError = () => apply({ type: "error", generation });
+    const armTimeout = () => {
+      stopTimer();
+      timer2 = setTimeout(() => apply({ type: "timeout", generation }), timeoutMs);
+    };
+    const settleOrArm = () => {
+      if (session.cancelled) return;
+      decodeToken += 1;
+      const token = decodeToken;
+      const state3 = historyCoverImageState(img, { eligible });
+      if (state3 === "loaded") {
+        apply({ type: "load", generation });
+        return;
+      }
+      if (!eligible) {
+        stopTimer();
+        return;
+      }
+      if (img.complete && typeof img.decode === "function") {
+        let pending;
+        try {
+          pending = img.decode();
+        } catch {
+          apply({ type: "error", generation });
+          return;
+        }
+        if (pending && typeof pending.then === "function") {
+          pending.then(
+            () => {
+              if (token !== decodeToken || session.cancelled) return;
+              apply({ type: "load", generation });
+            },
+            () => {
+              if (token !== decodeToken || session.cancelled) return;
+              apply({ type: "error", generation });
+            }
+          );
+        }
+      }
+      armTimeout();
+    };
+    const markEligible = () => {
+      if (session.cancelled || eligible) return;
+      eligible = true;
+      settleOrArm();
+    };
+    img.addEventListener("load", onLoad);
+    img.addEventListener("error", onError);
+    if (!eligible && io && io.observer && io.waiters) {
+      io.waiters.set(img, markEligible);
+      try {
+        io.observer.observe(img);
+      } catch {
+      }
+    } else if (eligible) {
+      settleOrArm();
+    }
+    return () => {
+      decodeToken += 1;
+      if (io && io.waiters) io.waiters.delete(img);
+      if (io && io.observer) {
+        try {
+          io.observer.unobserve(img);
+        } catch {
+        }
+      }
+      apply({ type: "cancel", generation });
+      img.removeEventListener("load", onLoad);
+      img.removeEventListener("error", onError);
+    };
+  }
+  function replaceWithPlaceholder(img, generation) {
+    if (!img || !img.parentNode) return;
+    if (img.getAttribute("data-cover-gen") !== String(generation)) return;
+    const letter = img.getAttribute("data-cover-letter") || "?";
+    const color = img.getAttribute("data-cover-color") || colorFromString("");
+    const ph = (img.ownerDocument || document).createElement("div");
+    ph.className = "cover-ph";
+    ph.setAttribute("aria-hidden", "true");
+    ph.style.background = color;
+    ph.textContent = letter;
+    img.replaceWith(ph);
+  }
+
   // ui/views/history.js
   var COMPLETED_NEAR_END_SEC = 3;
   var query2 = "";
   var filter = "all";
   var selectState2 = { mode: false, keys: /* @__PURE__ */ new Set() };
+  var unbindHistoryCovers = null;
+  function disposeHistoryCovers() {
+    if (typeof unbindHistoryCovers === "function") {
+      unbindHistoryCovers();
+      unbindHistoryCovers = null;
+    }
+  }
   function entryKey(entry) {
     return `${entry.feedUrl}::${entry.guid}`;
   }
@@ -3277,8 +4301,11 @@
     const dur = Number(entry && entry.durationSec) || 0;
     return dur > 0 && pos >= dur - COMPLETED_NEAR_END_SEC;
   }
+  function withEpisodeMeta(entry) {
+    return enrichHistoryEntry(entry, getData().subs || []);
+  }
   function filtered2(items) {
-    let list = items || [];
+    let list = (items || []).map(withEpisodeMeta);
     if (filter === "completed") list = list.filter(isCompletedEntry);
     if (query2.trim()) {
       list = list.filter(
@@ -3288,16 +4315,17 @@
     return list;
   }
   function toRowItem(entry) {
+    const item = withEpisodeMeta(entry);
     return {
-      ...entry,
+      ...item,
       // `progress` drives the badge; history keeps the highest position reached.
       progress: {
-        positionSec: entry.positionSec || 0,
-        durationSec: entry.durationSec || null,
-        completed: isCompletedEntry(entry)
+        positionSec: item.positionSec || 0,
+        durationSec: item.durationSec || null,
+        completed: isCompletedEntry(item)
       },
       // Reuse the date column for "played at".
-      pubDateMs: entry.playedAt || null,
+      pubDateMs: item.playedAt || null,
       pubDate: null
     };
   }
@@ -3331,6 +4359,7 @@
   function renderHistory() {
     const box = $("historyList");
     if (!box) return;
+    disposeHistoryCovers();
     const all = getData().history || [];
     if (!all.length) {
       box.innerHTML = '<div class="empty">\u8FD8\u6CA1\u6709\u6536\u542C\u8BB0\u5F55</div>';
@@ -3344,12 +4373,20 @@
       return;
     }
     const rows = items.map(toRowItem);
+    const subs = getData().subs || [];
+    const queueIndex = buildQueueIndex(getData().queueSongs);
     box.innerHTML = rows.map((entry, idx) => {
       const key = entryKey(entry);
       const lead = selectState2.mode ? `<input type="checkbox" class="sel-box" data-sel-key="${escapeHtml(key)}" ${selectState2.keys.has(key) ? "checked" : ""} aria-label="\u9009\u62E9" />` : "";
+      const queueState = queueButtonState(entry, queueIndex);
       const more = moreMenuHtml(
         [
-          { key: "queue", label: "\u52A0\u5165\u64AD\u653E\u5217\u8868", iconName: "listPlus", attrs: `data-idx="${idx}"` },
+          {
+            key: "queue",
+            label: queueState.label,
+            iconName: queueState.iconName,
+            attrs: queueMenuAttrs(entry, queueIndex, idx)
+          },
           { key: "cast", label: "\u6295\u653E\u5230\u97F3\u7BB1", iconName: "speaker", attrs: `data-idx="${idx}"` },
           {
             key: "remove-history",
@@ -3365,6 +4402,9 @@
         // Show "played at" rather than the episode's publish date.
         showDate: true,
         channelLink: true,
+        coverHtml: historyCoverHtml(entry, {
+          channelCoverUrl: channelCoverFromSubs(entry.feedUrl, subs)
+        }),
         leadHtml: lead,
         actions: selectState2.mode ? [] : [
           {
@@ -3378,6 +4418,7 @@
         moreHtml: selectState2.mode ? "" : more
       });
     }).join("");
+    unbindHistoryCovers = bindHistoryCoverRoot(box);
     if (selectState2.mode) {
       box.querySelectorAll("input[data-sel-key]").forEach((input) => {
         input.addEventListener("click", (ev) => ev.stopPropagation());
@@ -3417,6 +4458,15 @@
       }
     });
     syncSelectUi2();
+  }
+  var unbindQueueRepaint3 = null;
+  function bindHistoryQueueState() {
+    if (unbindQueueRepaint3) return;
+    unbindQueueRepaint3 = onQueueChange((index) => {
+      const box = $("historyList");
+      if (!box) return;
+      repaintQueueButtons(box, index);
+    });
   }
   function bindHistoryToolbar() {
     const clear = $("btnClearHistory");
@@ -3545,8 +4595,11 @@
     bindPlayerBar();
     bindCoverCache();
     bindRecentToolbar();
+    bindRecentQueueState();
     bindFavoritesToolbar();
+    bindFavoritesQueueState();
     bindHistoryToolbar();
+    bindHistoryQueueState();
     bindSubsToolbar();
     bindQueuePanel();
     bindSettings();

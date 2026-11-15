@@ -1,6 +1,7 @@
 import type { RefreshScheduleState } from "./schedule";
 import { DEFAULT_REFRESH_SCHEDULE, normalizeIntervalHours } from "./schedule";
 import { feedIdFromUrl, normalizeFeedUrl } from "./hash";
+import { usableCoverUrl } from "./coverUrl";
 
 /**
  * Hard cap on how many episodes we keep per subscription, in *every* path:
@@ -187,6 +188,66 @@ export function __resetStorageLocksForTests(): void {
 /** Canonical progress / history / mapping key: normalize(feedUrl)::guid */
 export function episodeStorageKey(feedUrl: string, guid: string): string {
   return `${normalizeFeedUrl(feedUrl)}::${guid}`;
+}
+
+/** Empty or the store fallback "Untitled" — not a real episode title. */
+export function isPlaceholderTitle(title?: string | null): boolean {
+  const t = String(title || "").trim();
+  return !t || t === "Untitled";
+}
+
+export type EpisodeDisplayMeta = {
+  title?: string;
+  showTitle?: string;
+  coverUrl?: string | null;
+  durationSec?: number | null;
+  subscriptionId?: string;
+  dedupKey?: string;
+};
+
+/**
+ * Look up episode display fields from the subscription index by feedUrl+guid.
+ * Channel artwork is not returned as coverUrl (display fallback is separate).
+ */
+export function findEpisodeMeta(
+  subs: Subscription[],
+  feedUrl: string,
+  guid: string
+): EpisodeDisplayMeta | null {
+  const key = episodeStorageKey(feedUrl, guid);
+  if (!key.endsWith("::" + String(guid || "").trim()) || key.startsWith("::")) return null;
+  for (const sub of Array.isArray(subs) ? subs : []) {
+    if (!sub) continue;
+    for (const ep of sub.episodes || []) {
+      if (!ep) continue;
+      const id = episodeIdentityKey(sub.url, ep.guid, ep.enclosureUrl);
+      if (!id.guid) continue;
+      if (episodeStorageKey(sub.url, id.guid) !== key) continue;
+      const title = !isPlaceholderTitle(ep.title) ? ep.title.trim() : undefined;
+      return {
+        title,
+        showTitle: sub.title && sub.title.trim() ? sub.title.trim() : undefined,
+        coverUrl: typeof ep.coverUrl === "string" && ep.coverUrl ? ep.coverUrl : null,
+        durationSec: ep.durationSec ?? null,
+        subscriptionId: sub.id,
+        dedupKey: ep.dedupKey,
+      };
+    }
+  }
+  return null;
+}
+
+function preferRealTitle(incoming?: string | null, existing?: string | null): string {
+  if (incoming && !isPlaceholderTitle(incoming)) return incoming.trim();
+  if (existing && !isPlaceholderTitle(existing)) return existing;
+  return "Untitled";
+}
+
+function preferShowTitle(incoming?: string | null, existing?: string | null): string {
+  const a = incoming && incoming.trim() ? incoming.trim() : "";
+  if (a) return a;
+  const b = existing && existing.trim() ? existing.trim() : "";
+  return b;
 }
 
 /** True when the sticky flag is set, or live position is within COMPLETED_NEAR_END_SEC of duration. */
@@ -422,8 +483,63 @@ async function loadHistoryUnlocked(): Promise<HistoryEntry[]> {
   }
 }
 
+function applyMetaToHistory(entry: HistoryEntry, meta: EpisodeDisplayMeta | null): HistoryEntry {
+  if (!meta) return entry;
+  let changed = false;
+  const next: HistoryEntry = { ...entry };
+  if (isPlaceholderTitle(next.title) && meta.title) {
+    next.title = meta.title;
+    changed = true;
+  }
+  if (!next.showTitle && meta.showTitle) {
+    next.showTitle = meta.showTitle;
+    changed = true;
+  }
+  if (!next.coverUrl && meta.coverUrl) {
+    next.coverUrl = meta.coverUrl;
+    changed = true;
+  }
+  if ((next.durationSec == null || next.durationSec <= 0) && meta.durationSec && meta.durationSec > 0) {
+    next.durationSec = meta.durationSec;
+    changed = true;
+  }
+  if (!next.subscriptionId && meta.subscriptionId) {
+    next.subscriptionId = meta.subscriptionId;
+    changed = true;
+  }
+  if (!next.dedupKey && meta.dedupKey) {
+    next.dedupKey = meta.dedupKey;
+    changed = true;
+  }
+  return changed ? next : entry;
+}
+
+async function enrichHistoryFromSubscriptions(list: HistoryEntry[]): Promise<{
+  list: HistoryEntry[];
+  changed: boolean;
+}> {
+  const needs = list.some(
+    (h) => isPlaceholderTitle(h.title) || !h.showTitle || !h.coverUrl
+  );
+  if (!needs) return { list, changed: false };
+  const subs = await loadSubscriptions();
+  if (!subs.length) return { list, changed: false };
+  let changed = false;
+  const next = list.map((h) => {
+    const enriched = applyMetaToHistory(h, findEpisodeMeta(subs, h.feedUrl, h.guid));
+    if (enriched !== h) changed = true;
+    return enriched;
+  });
+  return { list: next, changed };
+}
+
 export async function loadHistory(): Promise<HistoryEntry[]> {
-  return withStorageLock(HISTORY_KEY, () => loadHistoryUnlocked());
+  return withStorageLock(HISTORY_KEY, async () => {
+    const list = await loadHistoryUnlocked();
+    const enriched = await enrichHistoryFromSubscriptions(list);
+    if (enriched.changed) await saveHistoryUnlocked(enriched.list);
+    return enriched.list;
+  });
 }
 
 async function saveHistoryUnlocked(list: HistoryEntry[]): Promise<HistoryEntry[]> {
@@ -472,17 +588,41 @@ export async function recordHistory(
     const completedFlag =
       input.completed !== undefined ? !!input.completed : (existing && existing.completed) || false;
 
+    let title = preferRealTitle(input.title, existing && existing.title);
+    let showTitle = preferShowTitle(input.showTitle, existing && existing.showTitle);
+    let coverUrl =
+      usableCoverUrl(input.coverUrl) || usableCoverUrl(existing && existing.coverUrl) || null;
+    let durationSecFinal = durationSec;
+    let subscriptionId = input.subscriptionId || (existing && existing.subscriptionId) || "";
+    let dedupKey = input.dedupKey || (existing && existing.dedupKey) || "";
+    if (isPlaceholderTitle(title) || !showTitle || !coverUrl) {
+      try {
+        const meta = findEpisodeMeta(await loadSubscriptions(), feedUrl, guid);
+        if (meta) {
+          if (isPlaceholderTitle(title) && meta.title) title = meta.title;
+          if (!showTitle && meta.showTitle) showTitle = meta.showTitle;
+          if (!coverUrl && meta.coverUrl) coverUrl = usableCoverUrl(meta.coverUrl) || coverUrl;
+          if ((durationSecFinal == null || durationSecFinal <= 0) && meta.durationSec) {
+            durationSecFinal = meta.durationSec;
+          }
+          if (!subscriptionId && meta.subscriptionId) subscriptionId = meta.subscriptionId;
+          if (!dedupKey && meta.dedupKey) dedupKey = meta.dedupKey;
+        }
+      } catch {
+        /* subscription lookup is best-effort */
+      }
+    }
+
     const entry: HistoryEntry = {
       feedUrl: normalizeFeedUrl(feedUrl) || feedUrl,
       guid,
-      title: input.title || (existing && existing.title) || "Untitled",
-      showTitle: input.showTitle || (existing && existing.showTitle) || "",
-      coverUrl:
-        input.coverUrl !== undefined ? input.coverUrl : (existing && existing.coverUrl) || null,
-      durationSec,
+      title,
+      showTitle,
+      coverUrl,
+      durationSec: durationSecFinal,
       songId: input.songId !== undefined ? input.songId : (existing && existing.songId) || null,
-      subscriptionId: input.subscriptionId || (existing && existing.subscriptionId) || "",
-      dedupKey: input.dedupKey || (existing && existing.dedupKey) || "",
+      subscriptionId,
+      dedupKey,
       playedAt: input.playedAt !== undefined ? input.playedAt : now,
       positionSec,
       completed: isEpisodeCompleted(positionSec, durationSec, completedFlag),

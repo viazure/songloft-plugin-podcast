@@ -3,12 +3,21 @@
 import { $, escapeHtml, setHidden } from "../lib/dom.js";
 import { matchesQuery } from "../lib/format.js";
 import { getData } from "../lib/store.js";
+import { enrichHistoryEntry } from "../lib/episodeMeta.js";
 import { setButtonIcon } from "../lib/icons.js";
 import { episodeRowHtml, moreMenuHtml } from "../lib/rows.js";
+import { bindHistoryCoverRoot, channelCoverFromSubs, historyCoverHtml } from "../lib/historyCover.js";
+import {
+  buildQueueIndex,
+  queueButtonState,
+  queueMenuAttrs,
+  repaintQueueButtons,
+} from "../lib/queueMembership.js";
 import { bindRowInteractions } from "./row-events.js";
 import {
   batchDeleteHistoryItems,
   clearPlayHistory,
+  onQueueChange,
   reloadHistory,
   removeHistoryItem,
   setHistoryChangeHandler,
@@ -25,6 +34,14 @@ let query = "";
 /** @type {"all" | "completed"} */
 let filter = "all";
 const selectState = { mode: false, keys: new Set() };
+let unbindHistoryCovers = null;
+
+function disposeHistoryCovers() {
+  if (typeof unbindHistoryCovers === "function") {
+    unbindHistoryCovers();
+    unbindHistoryCovers = null;
+  }
+}
 
 function entryKey(entry) {
   return `${entry.feedUrl}::${entry.guid}`;
@@ -37,8 +54,12 @@ function isCompletedEntry(entry) {
   return dur > 0 && pos >= dur - COMPLETED_NEAR_END_SEC;
 }
 
+function withEpisodeMeta(entry) {
+  return enrichHistoryEntry(entry, getData().subs || []);
+}
+
 function filtered(items) {
-  let list = items || [];
+  let list = (items || []).map(withEpisodeMeta);
   if (filter === "completed") list = list.filter(isCompletedEntry);
   if (query.trim()) {
     list = list.filter(
@@ -54,16 +75,17 @@ function filtered(items) {
  * the date slot so the list reads as a timeline.
  */
 function toRowItem(entry) {
+  const item = withEpisodeMeta(entry);
   return {
-    ...entry,
+    ...item,
     // `progress` drives the badge; history keeps the highest position reached.
     progress: {
-      positionSec: entry.positionSec || 0,
-      durationSec: entry.durationSec || null,
-      completed: isCompletedEntry(entry),
+      positionSec: item.positionSec || 0,
+      durationSec: item.durationSec || null,
+      completed: isCompletedEntry(item),
     },
     // Reuse the date column for "played at".
-    pubDateMs: entry.playedAt || null,
+    pubDateMs: item.playedAt || null,
     pubDate: null,
   };
 }
@@ -105,6 +127,7 @@ function syncSearchClear() {
 export function renderHistory() {
   const box = $("historyList");
   if (!box) return;
+  disposeHistoryCovers();
   const all = getData().history || [];
   if (!all.length) {
     box.innerHTML = '<div class="empty">还没有收听记录</div>';
@@ -124,6 +147,8 @@ export function renderHistory() {
   }
 
   const rows = items.map(toRowItem);
+  const subs = getData().subs || [];
+  const queueIndex = buildQueueIndex(getData().queueSongs);
 
   box.innerHTML = rows
     .map((entry, idx) => {
@@ -134,9 +159,15 @@ export function renderHistory() {
           } aria-label="选择" />`
         : "";
 
+      const queueState = queueButtonState(entry, queueIndex);
       const more = moreMenuHtml(
         [
-          { key: "queue", label: "加入播放列表", iconName: "listPlus", attrs: `data-idx="${idx}"` },
+          {
+            key: "queue",
+            label: queueState.label,
+            iconName: queueState.iconName,
+            attrs: queueMenuAttrs(entry, queueIndex, idx),
+          },
           { key: "cast", label: "投放到音箱", iconName: "speaker", attrs: `data-idx="${idx}"` },
           {
             key: "remove-history",
@@ -152,6 +183,9 @@ export function renderHistory() {
         // Show "played at" rather than the episode's publish date.
         showDate: true,
         channelLink: true,
+        coverHtml: historyCoverHtml(entry, {
+          channelCoverUrl: channelCoverFromSubs(entry.feedUrl, subs),
+        }),
         leadHtml: lead,
         actions: selectState.mode
           ? []
@@ -168,6 +202,8 @@ export function renderHistory() {
       });
     })
     .join("");
+
+  unbindHistoryCovers = bindHistoryCoverRoot(box);
 
   if (selectState.mode) {
     box.querySelectorAll("input[data-sel-key]").forEach((input) => {
@@ -209,6 +245,17 @@ export function renderHistory() {
     },
   });
   syncSelectUi();
+}
+
+/** In-place queue button state (history rows only expose it in the 更多 menu). */
+let unbindQueueRepaint = null;
+export function bindHistoryQueueState() {
+  if (unbindQueueRepaint) return;
+  unbindQueueRepaint = onQueueChange((index) => {
+    const box = $("historyList");
+    if (!box) return;
+    repaintQueueButtons(box, index);
+  });
 }
 
 export function bindHistoryToolbar() {

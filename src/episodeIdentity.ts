@@ -10,8 +10,9 @@
  * progress or history.
  */
 
-import { episodeIdentityKey, loadSubscriptions, lookupSongMapping, rememberSongMapping } from "./store";
+import { episodeIdentityKey, findEpisodeMeta, isPlaceholderTitle, loadSubscriptions, lookupSongMapping, rememberSongMapping } from "./store";
 import { normalizeFeedUrl } from "./hash";
+import { pickEpisodeAndChannelCovers, usableCoverUrl } from "./coverUrl";
 
 export type ResolvedEpisodeIdentity = {
   feedUrl: string;
@@ -19,6 +20,8 @@ export type ResolvedEpisodeIdentity = {
   title?: string;
   showTitle?: string;
   coverUrl?: string | null;
+  /** Display-only fallback; never stored as the episode cover field. */
+  channelCoverUrl?: string | null;
   durationSec?: number | null;
   subscriptionId?: string;
   dedupKey?: string;
@@ -68,7 +71,7 @@ async function identityFromIndex(songId: number): Promise<ResolvedEpisodeIdentit
       guid: id.guid,
       title: ep.title,
       showTitle: sub.title,
-      coverUrl: ep.coverUrl || sub.coverUrl,
+      ...pickEpisodeAndChannelCovers(ep.coverUrl, sub.coverUrl),
       durationSec: ep.durationSec,
       subscriptionId: sub.id,
       dedupKey: ep.dedupKey,
@@ -76,6 +79,94 @@ async function identityFromIndex(songId: number): Promise<ResolvedEpisodeIdentit
     };
   }
   return null;
+}
+
+function sameIdentity(
+  feedUrl: string,
+  guid: string,
+  otherFeed: string,
+  otherGuid: string
+): boolean {
+  return (
+    (normalizeFeedUrl(feedUrl) || feedUrl) === (normalizeFeedUrl(otherFeed) || otherFeed) &&
+    String(guid || "").trim() === String(otherGuid || "").trim()
+  );
+}
+
+/**
+ * Mapping is only the SoT key. Fill title / show / cover from source_data or
+ * the subscription index so history writes do not land as Untitled.
+ */
+async function enrichIdentity(
+  songId: number,
+  feedUrl: string,
+  guid: string
+): Promise<Partial<ResolvedEpisodeIdentity>> {
+  const meta: Partial<ResolvedEpisodeIdentity> = {};
+
+  try {
+    if (typeof songloft.songs?.getById === "function") {
+      const song = await songloft.songs.getById(songId);
+      const id = identityFromSourceData(
+        song && ((song as { source_data?: unknown }).source_data ?? null)
+      );
+      if (id && sameIdentity(feedUrl, guid, id.feedUrl, id.guid)) {
+        const sd = parseSourceData((song as { source_data?: unknown }).source_data);
+        const title = typeof song?.title === "string" ? song.title : "";
+        if (!isPlaceholderTitle(title)) meta.title = title.trim();
+        const showTitle =
+          (sd && asNonEmptyString(sd.showTitle)) ||
+          (typeof song?.artist === "string" ? song.artist : "") ||
+          (typeof song?.album === "string" ? song.album : "") ||
+          "";
+        if (showTitle) meta.showTitle = showTitle;
+        const cover =
+          usableCoverUrl((sd && asNonEmptyString(sd.coverUrl)) || song?.cover_url) || null;
+        if (cover) meta.coverUrl = cover;
+        if (typeof song?.duration === "number" && song.duration > 0) meta.durationSec = song.duration;
+        const feedId = sd && asNonEmptyString(sd.feedId);
+        if (feedId) meta.subscriptionId = feedId;
+      }
+    }
+  } catch {
+    /* songs.read may be unavailable in tests */
+  }
+
+  if (isPlaceholderTitle(meta.title) || !meta.showTitle) {
+    try {
+      const fromSubs = findEpisodeMeta(await loadSubscriptions(), feedUrl, guid);
+      if (fromSubs) {
+        if (isPlaceholderTitle(meta.title) && fromSubs.title) meta.title = fromSubs.title;
+        if (!meta.showTitle && fromSubs.showTitle) meta.showTitle = fromSubs.showTitle;
+        if (!meta.coverUrl && fromSubs.coverUrl) meta.coverUrl = usableCoverUrl(fromSubs.coverUrl) || null;
+        if ((meta.durationSec == null || meta.durationSec <= 0) && fromSubs.durationSec) {
+          meta.durationSec = fromSubs.durationSec;
+        }
+        if (!meta.subscriptionId && fromSubs.subscriptionId) meta.subscriptionId = fromSubs.subscriptionId;
+        if (!meta.dedupKey && fromSubs.dedupKey) meta.dedupKey = fromSubs.dedupKey;
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  if (isPlaceholderTitle(meta.title) || !meta.showTitle) {
+    const fromIndex = await identityFromIndex(songId);
+    if (fromIndex && sameIdentity(feedUrl, guid, fromIndex.feedUrl, fromIndex.guid)) {
+      if (isPlaceholderTitle(meta.title) && fromIndex.title && !isPlaceholderTitle(fromIndex.title)) {
+        meta.title = fromIndex.title;
+      }
+      if (!meta.showTitle && fromIndex.showTitle) meta.showTitle = fromIndex.showTitle;
+      if (!meta.coverUrl && fromIndex.coverUrl) meta.coverUrl = fromIndex.coverUrl;
+      if ((meta.durationSec == null || meta.durationSec <= 0) && fromIndex.durationSec) {
+        meta.durationSec = fromIndex.durationSec;
+      }
+      if (!meta.subscriptionId && fromIndex.subscriptionId) meta.subscriptionId = fromIndex.subscriptionId;
+      if (!meta.dedupKey && fromIndex.dedupKey) meta.dedupKey = fromIndex.dedupKey;
+    }
+  }
+
+  return meta;
 }
 
 /**
@@ -90,10 +181,12 @@ export async function resolveEpisodeIdentity(
 
   const mapped = await lookupSongMapping(songId);
   if (mapped) {
+    const meta = await enrichIdentity(songId, mapped.feedUrl, mapped.guid);
     return {
       feedUrl: mapped.feedUrl,
       guid: mapped.guid,
       source: "mapping",
+      ...meta,
     };
   }
 
@@ -115,9 +208,7 @@ export async function resolveEpisodeIdentity(
             (typeof song?.album === "string" ? song.album : "") ||
             undefined,
           coverUrl:
-            (sd && asNonEmptyString(sd.coverUrl)) ||
-            (typeof song?.cover_url === "string" ? song.cover_url : null) ||
-            null,
+            usableCoverUrl((sd && asNonEmptyString(sd.coverUrl)) || song?.cover_url) || null,
           durationSec:
             typeof song?.duration === "number" && song.duration > 0 ? song.duration : null,
           subscriptionId: (sd && asNonEmptyString(sd.feedId)) || undefined,

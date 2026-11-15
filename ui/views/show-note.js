@@ -8,6 +8,7 @@ import { showNoteAvailable } from "../lib/rows.js";
 import { episodePayload, playEpisode, addToQueue, toggleFavorite } from "../lib/actions.js";
 import { api } from "../lib/api.js";
 import { castToSpeaker } from "../lib/actions.js";
+import { shownoteFootActions, SHOWNNOTE_FOOT_CLASS } from "../lib/shownoteActions.js";
 
 let context = null;
 
@@ -63,39 +64,30 @@ export async function openShowNote(ep) {
     `</div>`;
   body.innerHTML = html;
 
+  const [playAct, queueAct, castAct, favAct] = shownoteFootActions(ep);
   openModal({
     title: "",
     body,
     size: "wide",
+    footClass: SHOWNNOTE_FOOT_CLASS,
     actions: [
       {
-        label: "播放",
-        kind: "primary",
-        iconName: "play",
-        close: true,
+        ...playAct,
         onClick: () => {
           playEpisode(episodePayload(ep));
         },
       },
       {
-        label: "加入播放列表",
-        kind: "tonal",
-        iconName: "listPlus",
+        ...queueAct,
         close: true,
         onClick: () => addToQueue(ep),
       },
       {
-        label: "投放到音箱",
-        kind: "ghost",
-        iconName: "speaker",
-        close: true,
+        ...castAct,
         onClick: () => castToSpeaker(ep.songId, { prepareIfMissing: ep }),
       },
       {
-        label: ep.favorited ? "取消收藏" : "收藏",
-        kind: "ghost",
-        iconName: "star",
-        close: true,
+        ...favAct,
         onClick: () => toggleFavorite(ep, null),
       },
     ],

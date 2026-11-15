@@ -17,6 +17,7 @@ import { escapeHtml } from "./dom.js";
 import { icon } from "./icons.js";
 import { fmtSec, fmtTime, absoluteCoverUrl, colorFromString, progressRatio } from "./format.js";
 import { currentSongId, phaseLabel, liveProgressFor, get as getSnap } from "./playback.js";
+import { playButtonLabel } from "./playThrough.js";
 
 /** Progress badge styled like the reference (time above a thin bar / check when done). */
 export function progressBadgeHtml(prog, durationSec) {
@@ -101,6 +102,8 @@ function readRowProgress(row) {
  * @param {Array<{act:string,iconName:string,title:string,attrs?:string,cls?:string}>} [opts.actions]
  * @param {string}  [opts.moreHtml]  trailing「更多」popover markup
  * @param {boolean} [opts.channelLink] make the cover + channel name open the show
+ * @param {string}  [opts.coverHtml]   optional pre-rendered cover (history chain)
+ * @param {boolean} [opts.pending]     loading placeholder in the queue
  */
 export function episodeRowHtml(ep, idx, opts = {}) {
   const snap = getSnap();
@@ -115,15 +118,17 @@ export function episodeRowHtml(ep, idx, opts = {}) {
   const playIcon = isCurrent && snap.phase === "playing" ? "pause" : "play";
 
   const lead = opts.leadHtml || "";
+  const pending = !!opts.pending;
   const headGrid = lead ? "ep-head q-head" : "ep-head";
 
   // Channel affordance: both the artwork and the show name open the channel.
   const channelAttr = opts.channelLink ? `data-channel-tap data-idx="${idx}"` : "";
+  const art = opts.coverHtml || coverHtml(ep.coverUrl, ep.title || ep.showTitle);
   const cover = opts.channelLink
     ? `<button type="button" class="cover-btn" ${channelAttr} title="查看频道">` +
-      coverHtml(ep.coverUrl, ep.title || ep.showTitle) +
+      art +
       `</button>`
-    : coverHtml(ep.coverUrl, ep.title || ep.showTitle);
+    : art;
   const showName = ep.showTitle
     ? opts.channelLink
       ? `<button type="button" class="channel-link" ${channelAttr}>${escapeHtml(ep.showTitle)}</button>`
@@ -139,8 +144,8 @@ export function episodeRowHtml(ep, idx, opts = {}) {
     .join("");
 
   return (
-    `<div class="ep-row${isCurrent ? " is-current" : ""}${opts.extraClass ? " " + opts.extraClass : ""}" ` +
-    `data-row data-idx="${idx}" ${rowDataset(ep)}>` +
+    `<div class="ep-row${isCurrent ? " is-current" : ""}${pending ? " is-pending" : ""}${opts.extraClass ? " " + opts.extraClass : ""}" ` +
+    `data-row data-idx="${idx}" ${pending ? 'aria-busy="true" ' : ""}${rowDataset(ep)}>` +
     `<div class="${headGrid}">` +
     lead +
     cover +
@@ -149,15 +154,17 @@ export function episodeRowHtml(ep, idx, opts = {}) {
     `${escapeHtml(ep.title || "未命名")}</button>` +
     `<div class="meta-line">` +
     showName +
-    `<span data-now-badge ${isCurrent && label ? "" : "hidden"}>${escapeHtml(isCurrent ? label : "")}</span>` +
-    `<span data-prog-slot>${progressBadgeHtml(prog, ep.durationSec)}</span>` +
-    (showDate ? `<span class="hide-sm">${escapeHtml(fmtTime(dateMs))}</span>` : "") +
+    (pending
+      ? `<span class="q-pending">正在加入…</span>`
+      : `<span data-now-badge ${isCurrent && label ? "" : "hidden"}>${escapeHtml(isCurrent ? label : "")}</span>` +
+        `<span data-prog-slot>${progressBadgeHtml(prog, ep.durationSec)}</span>` +
+        (showDate ? `<span class="hide-sm">${escapeHtml(fmtTime(dateMs))}</span>` : "")) +
     `</div>` +
     `</div>` +
     `</div>` +
     `<div class="actions-row">` +
-    `<button type="button" class="icon-btn icon-btn--play" data-play-btn data-idx="${idx}" title="播放">` +
-    `${icon(playIcon, 17)}</button>` +
+    `<button type="button" class="icon-btn icon-btn--play" data-play-btn data-idx="${idx}" title="${playButtonLabel({ isCurrent, phase: snap.phase, pending })}" aria-label="${playButtonLabel({ isCurrent, phase: snap.phase, pending })}"${pending ? " disabled" : ""}>` +
+    `${pending ? '<span class="q-spinner" aria-hidden="true"></span>' : icon(playIcon, 17)}</button>` +
     actions +
     (opts.moreHtml || "") +
     `</div>` +
@@ -165,26 +172,28 @@ export function episodeRowHtml(ep, idx, opts = {}) {
   );
 }
 
-/** Popover markup for「更多」. */
+/**
+ * Popover markup for「更多」.
+ *
+ * Every item keeps `data-more-act`, so its click path is unchanged even when the
+ * control reports「已在播放列表」. That state is expressed with `aria-disabled`
+ * (inside `attrs`) instead of a native `disabled` attribute, which keeps the item
+ * keyboard reachable and able to show its tooltip and its own explanation toast.
+ */
 export function moreMenuHtml(items, wrapKey) {
   const body = items
     .map((it) => {
-      if (it.disabled) {
-        return (
-          `<button type="button" disabled>` +
-          (it.iconName ? icon(it.iconName, 15) : "") +
-          `<span>${escapeHtml(it.label)}</span></button>`
-        );
-      }
+      const label = escapeHtml(it.label);
+      const cls = it.danger ? "danger-text" : "";
       return (
-        `<button type="button" class="${it.danger ? "danger-text" : ""}" data-more-act="${escapeHtml(
-          it.key
-        )}" ${it.attrs || ""}>` +
+        `<button type="button" class="${cls}" data-more-act="${escapeHtml(it.key)}" ` +
+        `title="${label}" ${it.attrs || ""}>` +
         (it.iconName ? icon(it.iconName, 15) : "") +
-        `<span>${escapeHtml(it.label)}</span></button>`
+        `<span>${label}</span></button>`
       );
     })
-    .join("");  return (
+    .join("");
+  return (
     `<div class="more-wrap" data-more-wrap="${escapeHtml(String(wrapKey))}">` +
     `<button type="button" class="icon-btn" data-more-toggle title="更多">${icon("moreHorizontal", 17)}</button>` +
     `<div class="more-menu">${body}</div>` +
@@ -226,8 +235,11 @@ export function paintRows(snap) {
     const playBtn = row.querySelector("[data-play-btn]");
     if (playBtn) {
       const iconName = isCurrent && current.phase === "playing" ? "pause" : "play";
-      playBtn.innerHTML = icon(iconName, 17);
-      playBtn.title = isCurrent && current.phase === "playing" ? "暂停" : isCurrent ? "继续" : "播放";
+      const pending = row.classList.contains("is-pending");
+      const label = playButtonLabel({ isCurrent, phase: current.phase, pending });
+      if (!pending) playBtn.innerHTML = icon(iconName, 17);
+      playBtn.title = label;
+      playBtn.setAttribute("aria-label", label);
     }
 
     const slot = row.querySelector("[data-prog-slot]");

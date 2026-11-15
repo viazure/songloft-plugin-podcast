@@ -44,6 +44,8 @@ export function closeModal(result) {
   if (typeof dialog.close === "function" && dialog.open) dialog.close();
   else dialog.removeAttribute("open");
   dialog.classList.remove("modal--wide", "modal--sheet");
+  const foot = dialog.querySelector("#appModalFoot");
+  if (foot) foot.className = "modal__foot";
   const done = modalResolve;
   modalResolve = null;
   if (done) done(result);
@@ -55,9 +57,10 @@ export function closeModal(result) {
  * @param {object} opts
  * @param {string} [opts.title]
  * @param {string|Node} [opts.body]   HTML string or DOM node
- * @param {Array<{label:string, kind?:string, iconName?:string, value?:any, onClick?:Function, close?:boolean}>} [opts.actions]
+ * @param {Array<{label:string, shortLabel?:string, ariaLabel?:string, title?:string, ariaPressed?:boolean, kind?:string, iconName?:string, value?:any, onClick?:Function, close?:boolean}>} [opts.actions]
  * @param {"default"|"wide"|"sheet"} [opts.size]
  * @param {boolean} [opts.dismissible]
+ * @param {string} [opts.footClass]  extra class on #appModalFoot (e.g. episode actions)
  * @returns {Promise<any>} resolves with the clicked action value (or undefined)
  */
 export function openModal(opts = {}) {
@@ -76,6 +79,7 @@ export function openModal(opts = {}) {
   if (opts.body instanceof Node) bodyEl.appendChild(opts.body);
   else if (typeof opts.body === "string") bodyEl.innerHTML = opts.body;
 
+  footEl.className = "modal__foot" + (opts.footClass ? ` ${opts.footClass}` : "");
   footEl.innerHTML = "";
   const actions = opts.actions || [{ label: "关闭", value: undefined, close: true }];
   for (const action of actions) {
@@ -90,7 +94,21 @@ export function openModal(opts = {}) {
           : kind === "tonal"
             ? "btn btn--tonal"
             : "btn btn--ghost";
-    btn.innerHTML = (action.iconName ? icon(action.iconName, 15) : "") + `<span>${escapeHtml(action.label)}</span>`;
+    const fullName = action.ariaLabel || action.label;
+    btn.setAttribute("aria-label", fullName);
+    btn.title = action.title || fullName;
+    if (action.ariaPressed != null) {
+      btn.setAttribute("aria-pressed", action.ariaPressed ? "true" : "false");
+    }
+    const iconHtml = action.iconName ? icon(action.iconName, 15) : "";
+    if (action.shortLabel) {
+      btn.innerHTML =
+        iconHtml +
+        `<span class="btn-label-full">${escapeHtml(action.label)}</span>` +
+        `<span class="btn-label-short">${escapeHtml(action.shortLabel)}</span>`;
+    } else {
+      btn.innerHTML = iconHtml + `<span>${escapeHtml(action.label)}</span>`;
+    }
     btn.addEventListener("click", async () => {
       if (action.onClick) {
         const keepOpen = await action.onClick();
@@ -98,7 +116,8 @@ export function openModal(opts = {}) {
       }
       const shouldClose = action.close !== false;
       if (shouldClose) closeModal(action.value);
-    });    footEl.appendChild(btn);
+    });
+    footEl.appendChild(btn);
   }
 
   if (opts.dismissible === false) {

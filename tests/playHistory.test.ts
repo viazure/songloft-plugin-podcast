@@ -5,6 +5,7 @@ import {
   MAX_HISTORY,
   recordHistory,
   removeHistoryEntry,
+  saveSubscriptions,
   touchHistoryProgress,
 } from "../src/store";
 
@@ -147,5 +148,105 @@ describe("play history", () => {
     await recordHistory({ ...entry(1), feedUrl: "https://example.com/feed.xml", playedAt: 2000 });
     const loaded = await loadHistory();
     expect(loaded).toHaveLength(1);
+  });
+
+
+  it("does not let null, empty, or non-absolute covers overwrite a stored episode cover", async () => {
+    await recordHistory({ ...entry(1), coverUrl: "https://cdn.example/ep.jpg" });
+
+    await recordHistory({ feedUrl: entry(1).feedUrl, guid: "guid-1", coverUrl: null, playedAt: 2000 });
+    expect((await loadHistory())[0].coverUrl).toBe("https://cdn.example/ep.jpg");
+
+    await recordHistory({ feedUrl: entry(1).feedUrl, guid: "guid-1", coverUrl: "", playedAt: 3000 });
+    expect((await loadHistory())[0].coverUrl).toBe("https://cdn.example/ep.jpg");
+
+    await recordHistory({
+      feedUrl: entry(1).feedUrl,
+      guid: "guid-1",
+      coverUrl: "/relative.png",
+      playedAt: 4000,
+    });
+    expect((await loadHistory())[0].coverUrl).toBe("https://cdn.example/ep.jpg");
+  });
+
+  it("accepts a later valid episode cover and still starts from null when nothing usable exists", async () => {
+    await recordHistory({ ...entry(1), coverUrl: null });
+    expect((await loadHistory())[0].coverUrl).toBeNull();
+
+    await recordHistory({
+      feedUrl: entry(1).feedUrl,
+      guid: "guid-1",
+      coverUrl: "https://cdn.example/new.jpg",
+      playedAt: 2000,
+    });
+    expect((await loadHistory())[0].coverUrl).toBe("https://cdn.example/new.jpg");
+  });
+});
+
+describe("history title backfill", () => {
+  beforeEach(() => installStorage());
+
+  it("lets a later real title replace a stored Untitled", async () => {
+    const feedUrl = "https://example.com/feed.xml";
+    await recordHistory({ feedUrl, guid: "g", title: "Untitled", playedAt: 1 });
+    await recordHistory({ feedUrl, guid: "g", title: "Real Title", playedAt: 2 });
+    expect((await loadHistory())[0].title).toBe("Real Title");
+  });
+
+  it("fills Untitled titles from the subscription index and persists them", async () => {
+    const bag = installStorage();
+    const feedUrl = "https://feed.xyzfm.space/m3dda867gh7j";
+    const guid = "6aa41efc492687f6aad88f7f";
+    const title = "No.233 单口｜手机为什么要折叠？Apple 为什么要「跟风」？";
+    bag["play_history"] = [
+      {
+        feedUrl,
+        guid,
+        title: "Untitled",
+        showTitle: "",
+        coverUrl: null,
+        playedAt: 1,
+        positionSec: 0,
+        completed: true,
+        songId: 6574,
+      },
+    ];
+    await saveSubscriptions([
+      {
+        id: "san",
+        url: feedUrl,
+        title: "三五环",
+        author: null,
+        coverUrl: "https://cdn/show.jpg",
+        createdAt: 1,
+        updatedAt: 1,
+        lastSuccessAt: 1,
+        lastError: null,
+        lastSkippedNonAudio: 0,
+        episodeCount: 1,
+        truncated: false,
+        episodes: [
+          {
+            title,
+            guid,
+            guidSource: "rss",
+            pubDate: null,
+            pubDateMs: null,
+            durationSec: 3600,
+            coverUrl: "https://cdn/ep.jpg",
+            enclosureUrl: "https://cdn/ep.mp3",
+            dedupKey: "dk",
+          },
+        ],
+      },
+    ]);
+    const loaded = await loadHistory();
+    expect(loaded[0]).toMatchObject({
+      title,
+      showTitle: "三五环",
+      coverUrl: "https://cdn/ep.jpg",
+    });
+    const stored = bag["play_history"] as Array<{ title: string }>;
+    expect(stored[0].title).toBe(title);
   });
 });

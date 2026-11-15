@@ -16,12 +16,17 @@ import { startDataSync } from "./lib/sync.js";
 import * as actions from "./lib/actions.js";
 
 import { bindPlayerBar, renderPlayerBar, bindCoverCache } from "./views/player-bar.js";
-import { renderRecent, bindRecentToolbar } from "./views/recent.js";
-import { renderFavorites, bindFavoritesToolbar } from "./views/favorites.js";
+import { renderRecent, bindRecentToolbar, bindRecentQueueState } from "./views/recent.js";
+import { renderFavorites, bindFavoritesToolbar, bindFavoritesQueueState } from "./views/favorites.js";
 import { renderSubs, bindSubsToolbar } from "./views/subs.js";
 import { bindQueuePanel, renderQueue } from "./views/queue.js";
 import { bindSettings, loadLog, loadSettings, loadCastDevices } from "./views/settings.js";
-import { renderHistory, bindHistoryToolbar, loadHistoryView } from "./views/history.js";
+import {
+  renderHistory,
+  bindHistoryToolbar,
+  bindHistoryQueueState,
+  loadHistoryView,
+} from "./views/history.js";
 import { paintRows } from "./lib/rows.js";
 
 /** Nav order: 更新 | 收藏 | 历史 | 订阅 | 设置（`recent` = Updates feed）. */
@@ -94,8 +99,11 @@ async function init() {
   bindPlayerBar();
   bindCoverCache();
   bindRecentToolbar();
+  bindRecentQueueState();
   bindFavoritesToolbar();
+  bindFavoritesQueueState();
   bindHistoryToolbar();
+  bindHistoryQueueState();
   bindSubsToolbar();
   bindQueuePanel();
   bindSettings();
@@ -110,6 +118,7 @@ async function init() {
     paintRows(snap);
     refreshBackToTopTargets();
   });
+
 
   const caps = await Host.getCapabilities();
   actions.setCapabilities(caps);

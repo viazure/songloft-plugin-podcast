@@ -4,8 +4,15 @@ import { $, escapeHtml } from "../lib/dom.js";
 import { matchesQuery } from "../lib/format.js";
 import { getData } from "../lib/store.js";
 import { episodeRowHtml, moreMenuHtml } from "../lib/rows.js";
+import {
+  buildQueueIndex,
+  queueButtonAttrs,
+  queueButtonState,
+  queueMenuAttrs,
+  repaintQueueButtons,
+} from "../lib/queueMembership.js";
 import { bindRowInteractions } from "./row-events.js";
-import { reloadFavorites, toggleFavorite } from "../lib/actions.js";
+import { onQueueChange, reloadFavorites, toggleFavorite } from "../lib/actions.js";
 
 let query = "";
 
@@ -32,12 +39,19 @@ export function renderFavorites() {
     syncClearButton();
     return;
   }
+  const queueIndex = buildQueueIndex(getData().queueSongs);
 
   box.innerHTML = items
     .map((ep, idx) => {
+      const queueState = queueButtonState(ep, queueIndex);
       const more = moreMenuHtml(
         [
-          { key: "queue", label: "加入播放列表", iconName: "listPlus", attrs: `data-idx="${idx}"` },
+          {
+            key: "queue",
+            label: queueState.label,
+            iconName: queueState.iconName,
+            attrs: queueMenuAttrs(ep, queueIndex, idx),
+          },
           { key: "cast", label: "投放到音箱", iconName: "speaker", attrs: `data-idx="${idx}"` },
           { key: "unfav", label: "取消收藏", iconName: "star", danger: true, attrs: `data-idx="${idx}"` },
         ],
@@ -46,7 +60,15 @@ export function renderFavorites() {
       return episodeRowHtml(ep, idx, {
         showDate: false,
         channelLink: true,
-        actions: [{ act: "queue", iconName: "listPlus", title: "加入播放列表" }],
+        actions: [
+          {
+            act: "queue",
+            iconName: queueState.iconName,
+            title: queueState.label,
+            cls: queueState.inQueue ? "is-in-queue" : "",
+            attrs: queueButtonAttrs(ep, queueIndex),
+          },
+        ],
         moreHtml: more,
       });
     })
@@ -65,6 +87,17 @@ export function renderFavorites() {
 function syncClearButton() {
   const clear = $("favSearchClear");
   if (clear) clear.classList.toggle("hidden", !query.trim());
+}
+
+/** In-place queue button state (no re-render). */
+let unbindQueueRepaint = null;
+export function bindFavoritesQueueState() {
+  if (unbindQueueRepaint) return;
+  unbindQueueRepaint = onQueueChange((index) => {
+    const box = $("favList");
+    if (!box) return;
+    repaintQueueButtons(box, index);
+  });
 }
 
 export function bindFavoritesToolbar() {

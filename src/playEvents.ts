@@ -12,6 +12,7 @@
 
 import type { PlayEvent } from "@songloft/plugin-sdk";
 import { resolveEpisodeIdentity } from "./episodeIdentity";
+import { usableCoverUrl } from "./coverUrl";
 import {
   recordHistory,
   rememberSongMapping,
@@ -57,7 +58,7 @@ async function applyPlay(songId: number, at: number): Promise<void> {
     guid: id.guid,
     title: id.title,
     showTitle: id.showTitle,
-    coverUrl: id.coverUrl ?? null,
+    coverUrl: usableCoverUrl(id.coverUrl),
     durationSec: id.durationSec ?? null,
     songId,
     subscriptionId: id.subscriptionId,
@@ -106,7 +107,7 @@ async function applyFinish(songId: number): Promise<void> {
     guid: id.guid,
     title: id.title,
     showTitle: id.showTitle,
-    coverUrl: id.coverUrl ?? null,
+    coverUrl: usableCoverUrl(id.coverUrl),
     durationSec,
     songId,
     subscriptionId: id.subscriptionId,
@@ -126,7 +127,7 @@ async function applySkip(songId: number): Promise<void> {
     guid: id.guid,
     title: id.title,
     showTitle: id.showTitle,
-    coverUrl: id.coverUrl ?? null,
+    coverUrl: usableCoverUrl(id.coverUrl),
     durationSec: id.durationSec ?? null,
     songId,
     subscriptionId: id.subscriptionId,

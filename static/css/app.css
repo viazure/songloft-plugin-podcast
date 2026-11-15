@@ -695,6 +695,16 @@ main > section > .card:not(.card--fill) {
 .actions-row [data-act="fav"]:not([aria-pressed="true"]):hover {
   background: color-mix(in srgb, CanvasText 12%, Canvas);
 }
+/* Already in the queue: brand-colored checklist, no fill (keep the row of
+   action buttons from turning into a wall of coloured squares). */
+.actions-row [data-act="queue"][data-in-queue],
+.actions-row [data-act="queue"][aria-pressed="true"] {
+  color: var(--brand);
+}
+.actions-row [data-act="queue"][data-in-queue]:hover,
+.actions-row [data-act="queue"][aria-pressed="true"]:hover {
+  color: var(--brand-strong);
+}
 .actions-row .icon-btn--star[aria-pressed="true"],
 .actions-row [data-act="fav"][aria-pressed="true"] {
   background: var(--brand-soft);
@@ -749,12 +759,42 @@ main > section > .card:not(.card--fill) {
   border-radius: var(--radius-sm);
   padding: 8px 10px;
   font-size: 0.85rem;
+  white-space: nowrap;
+}
+.more-menu button span:not(.ico) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .more-menu button:hover { background: var(--surface-3); }
 .more-menu button.danger-text { color: var(--err); }
 .more-menu button .ico { width: 15px; height: 15px; color: var(--muted); }
 .more-menu .sep { height: 1px; background: var(--border); margin: 4px 2px; }
 
+/* ---------- queue ---------- */
+.q-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--text);
+  border-radius: 50%;
+  animation: q-spin 0.7s linear infinite;
+  flex: 0 0 auto;
+}
+@keyframes q-spin {
+  to { transform: rotate(360deg); }
+}
+.ep-row.is-pending { opacity: 0.82; }
+.q-pending {
+  display: inline-flex;
+  align-items: center;
+  color: var(--muted);
+}
+.q-pending-lead {
+  width: 16px;
+  flex: 0 0 16px;
+}
 /* ---------- queue ---------- */
 .queue-panel { min-height: 0; display: flex; }
 .queue-panel__backdrop { display: none; }
@@ -1248,6 +1288,22 @@ main > section > .card:not(.card--fill) {
   justify-content: flex-end;
   flex-wrap: wrap;
 }
+
+/* ShowNote episode actions (3.3): 44x44 hit targets, 8px gap, safe-area. */
+#appModalFoot.modal__foot--episode-actions {
+  gap: 8px;
+  justify-content: stretch;
+  padding: 10px 16px calc(14px + env(safe-area-inset-bottom, 0px));
+}
+#appModalFoot.modal__foot--episode-actions .btn {
+  box-sizing: border-box;
+  min-width: 44px;
+  min-height: 44px;
+  flex: 1 0 calc(25% - 6px);
+}
+#appModalFoot.modal__foot--episode-actions .btn-label-short { display: none; }
+#appModalFoot.modal__foot--episode-actions .btn-label-full { display: inline; }
+
 .modal--wide { max-width: min(760px, calc(100vw - 24px)); }
 .modal--sheet { max-width: 100vw; width: 100%; margin: auto auto 0; }
 .modal--sheet .modal__panel {
@@ -1471,6 +1527,17 @@ main > section > .card:not(.card--fill) {
     max-height: 92vh;
   }
   .sn-body img { max-width: 46%; }
+
+  /* ShowNote foot: short labels + forced 2x2 so 44px targets are never shrunk. */
+  #appModalFoot.modal__foot--episode-actions .btn {
+    flex: 1 0 calc(50% - 4px);
+    max-width: calc(50% - 4px);
+    min-width: 44px;
+    min-height: 44px;
+  }
+  #appModalFoot.modal__foot--episode-actions .btn-label-full { display: none; }
+  #appModalFoot.modal__foot--episode-actions .btn-label-short { display: inline; }
+
 
   .fab { right: 12px; bottom: calc(var(--player-h) + 12px + env(safe-area-inset-bottom, 0px)); }
 

@@ -12,6 +12,32 @@ import { getData, patch } from "./store.js";
 import { toast, clearToast } from "./toast.js";
 import { openModal, uiConfirm, closeModal } from "./modal.js";
 import { escapeHtml } from "./dom.js";
+import { buildQueueIndex, isInPodcastQueue as isEpInQueue } from "./queueMembership.js";
+import {
+  appendPendingSong,
+  createQueueWriteTracker,
+  hasPendingSong,
+  playedSongs,
+  reorderSongs,
+  rollbackPlan,
+  shouldApplyQueueResponse,
+  snapshotQueue,
+  withoutSongs,
+} from "./queueOptimistic.js";
+import {
+  SET_QUEUE_UNAVAILABLE,
+  SINGLE_MODE_MESSAGE,
+  SINGLE_MODE_OK,
+  SINGLE_MODE_TITLE,
+  PLAY_FROM_START_MESSAGE,
+  PLAY_FROM_START_OK,
+  PLAY_FROM_START_TITLE,
+  episodeSongId,
+  hostQueueMatches,
+  isSinglePlayMode,
+  queueIdsForStart,
+  readPlayMode,
+} from "./playThrough.js";
 
 /**
  * Every user-visible mutation reports back through `notify`, so playback and
@@ -130,8 +156,13 @@ export function startProgressTracking() {
 /* ------------------------------------------------------------------ */
 
 export async function reloadQueue() {
+  if (queueWrites.isPending()) return getData();
+  const token = queueWrites.current();
   try {
     const r = await api.queue();
+    if (queueWrites.isPending() || !shouldApplyQueueResponse(token, queueWrites)) {
+      return getData();
+    }
     if (!r.ok) {
       patch({ queueSongs: [], queueMeta: null });
       return getData();
@@ -140,11 +171,72 @@ export async function reloadQueue() {
       queueSongs: r.songs || [],
       queueMeta: { playlistId: r.playlistId, playlistName: r.playlistName },
     });
+    const data = getData();
+    for (const fn of queueRepainters) {
+      try {
+        fn(buildQueueIndex(data.queueSongs));
+      } catch (_) {
+        /* a broken repainter must not stop the queue update */
+      }
+    }
   } catch (e) {
+    if (queueWrites.isPending() || !shouldApplyQueueResponse(token, queueWrites)) {
+      return getData();
+    }
     patch({ queueSongs: [], queueMeta: null });
     notify("读取播放列表失败（需宿主 playlists 权限）", "warn");
   }
   return getData();
+}
+
+/**
+ * Views that render「加入播放列表」buttons register here so the button state can
+ * follow the queue without a full re-render (and therefore without the list
+ * jumping under the user). Returns a disposer.
+ */
+const queueRepainters = new Set();
+const queueViewListeners = new Set();
+
+export function onQueueChange(fn) {
+  if (typeof fn !== "function") return () => {};
+  queueRepainters.add(fn);
+  return () => queueRepainters.delete(fn);
+}
+
+/** The queue panel registers here so mutations can re-render the list immediately. */
+export function onQueueViewChange(fn) {
+  if (typeof fn !== "function") return () => {};
+  queueViewListeners.add(fn);
+  return () => queueViewListeners.delete(fn);
+}
+
+function notifyQueueViews() {
+  for (const fn of queueViewListeners) {
+    try {
+      fn();
+    } catch (_) {
+      /* ignore */
+    }
+  }
+}
+
+const queueRevealers = new Set();
+
+/** The queue panel registers here so a pending add can open the list into view. */
+export function onEnsureQueueVisible(fn) {
+  if (typeof fn !== "function") return () => {};
+  queueRevealers.add(fn);
+  return () => queueRevealers.delete(fn);
+}
+
+function ensureQueueVisible() {
+  for (const fn of queueRevealers) {
+    try {
+      fn();
+    } catch (_) {
+      /* ignore */
+    }
+  }
 }
 
 export async function reloadRecent() {
@@ -341,13 +433,38 @@ async function resumeCurrentIfSame(songId) {
  * @param {object} ep
  * @param {{forcePrepare?: boolean, resume?: boolean}} [opts]
  */
+async function ensureSequentialPlayMode() {
+  let st;
+  try {
+    st = await Host.getState();
+  } catch {
+    return;
+  }
+  if (!isSinglePlayMode(readPlayMode(st))) return;
+  const ok = await uiConfirm({
+    title: SINGLE_MODE_TITLE,
+    message: SINGLE_MODE_MESSAGE,
+    okText: SINGLE_MODE_OK,
+  });
+  if (!ok) return;
+  try {
+    await Host.setPlayMode("order");
+  } catch (e) {
+    notify(String((e && e.message) || e), "err");
+  }
+}
+
 export async function playEpisode(ep, opts = {}) {
   if (!caps.available || !caps.hasPlayer) {
     notify("宿主播放器不可用", "warn");
     return;
   }
+  if (!Host.hasSetQueue()) {
+    notify(SET_QUEUE_UNAVAILABLE, "err");
+    return;
+  }
 
-  let songId = ep.songId;
+  let songId = episodeSongId(ep);
   const ctx = {
     subscriptionId: ep.subscriptionId || "",
     feedUrl: ep.feedUrl || "",
@@ -409,9 +526,38 @@ export async function playEpisode(ep, opts = {}) {
       }
     }
 
-    // Start playback first, then append to the fixed playlist in the background.
+    const membershipEp = { ...ep, ...ctx, songId };
+    const queuedNow = getData().queueSongs || [];
+    if (!isEpInQueue(membershipEp, buildQueueIndex(queuedNow)) && !hasPendingSong(queuedNow, membershipEp)) {
+      const added = await addToQueue(membershipEp, null, { quiet: true });
+      if (!added || !added.ok) {
+        notify("未能加入播放列表，仍将从这一集开始", "warn");
+      }
+    }
+
+    const { ids, startIndex } = queueIdsForStart(getData().queueSongs, songId);
+    if (!ids.length) {
+      notify("没有可播放的内容", "warn");
+      return;
+    }
+
+    await ensureSequentialPlayMode();
+
+    let hostState = null;
+    try {
+      hostState = await Host.getState();
+    } catch (_) {
+      /* probe is optional; we will setQueue when unsure */
+    }
+    const sameList = hostQueueMatches(hostState, ids);
+
     Playback.beginPlayRequest({ ...ctx, songId });
-    await Host.play(songId);
+    if (sameList) {
+      await Host.play(songId);
+    } else {
+      const playlistId = getData().queueMeta && getData().queueMeta.playlistId;
+      await Host.replaceQueueAndPlay(ids, startIndex, { sourcePlaylistId: playlistId });
+    }
     notify(`正在播放「${ctx.title || "当前单集"}」`, "ok");
 
     const ok = await syncPlayStateAfterRequest(songId);
@@ -480,19 +626,6 @@ export async function playEpisode(ep, opts = {}) {
         .catch(() => {});
     }
 
-    if (!getData().queueSongs.some((s) => s.id === songId)) {
-      api
-        .queueAddIds([songId])
-        .then((r) => {
-          if (r && r.ok && (r.added || 0) > 0) {
-            notify("已加入「播客」播放列表", "ok");
-          }
-          return reloadQueue();
-        })
-        .catch(() => {
-          notify("未能自动加入播放列表，可手动「加入播放列表」", "warn");
-        });
-    }
   } catch (e) {
     Playback.playFailed(String((e && e.message) || e));
     notify(String((e && e.message) || e), "err");
@@ -539,7 +672,33 @@ export async function togglePlayPause() {
   }
 }
 
-export async function addToQueue(ep) {
+export async function addToQueue(ep, btn, opts = {}) {
+  const quiet = !!opts.quiet;
+  const data = getData();
+  const index = buildQueueIndex(data.queueSongs);
+  if (isEpInQueue(ep, index)) {
+    if (!quiet) notify(`《${shortTitle(ep.title)}》已在播放列表「播客」中`, "warn");
+    return { ok: true, already: true };
+  }
+  if (hasPendingSong(data.queueSongs, ep)) {
+    if (!quiet) {
+      notify(`正在加入《${shortTitle(ep.title)}》…`, "muted");
+      ensureQueueVisible();
+    }
+    return { ok: false, pending: true };
+  }
+  if (btn) {
+    btn.setAttribute("aria-busy", "true");
+    btn.disabled = true;
+  }
+  const gen = beginQueueWrite();
+  const before = snapshotQueue(data);
+  patch({
+    queueSongs: appendPendingSong(before.queueSongs, ep),
+    queueMeta: before.queueMeta,
+  });
+  notifyQueueViews();
+  ensureQueueVisible();
   try {
     const r = await api.queueAdd({
       subscriptionId: ep.subscriptionId,
@@ -547,18 +706,30 @@ export async function addToQueue(ep) {
       dedupKey: ep.dedupKey,
     });
     if (!r.ok) {
+      rollbackQueue(before, gen);
       notify(r.error || "加入播放列表失败（准备音频）", "err");
-      return;
+      return { ok: false };
     }
     const name = r.playlistName || "播客";
-    const bits = [];
-    if (r.added > 0) bits.push(`已将《${shortTitle(ep.title)}》加入播放列表「${name}」`);
-    else if (r.skipped > 0) bits.push(`《${shortTitle(ep.title)}》已在播放列表「${name}」中`);
-    else bits.push(`未能加入播放列表「${name}」`);
-    notify(bits.join(""), r.added > 0 ? "ok" : "warn");
-    await reloadQueue();
+    if (!quiet) {
+      const bits = [];
+      if (r.added > 0) bits.push(`已将《${shortTitle(ep.title)}》加入播放列表「${name}」`);
+      else if (r.skipped > 0) bits.push(`《${shortTitle(ep.title)}》已在播放列表「${name}」中`);
+      else bits.push(`未能加入播放列表「${name}」`);
+      notify(bits.join(""), r.added > 0 ? "ok" : "warn");
+    }
+    await reloadQueueIfCurrent(gen);
+    return { ok: true, already: (r.skipped || 0) > 0, added: (r.added || 0) > 0 };
   } catch (e) {
+    rollbackQueue(before, gen);
     notify(String(e), "err");
+    return { ok: false };
+  } finally {
+    queueWrites.end();
+    if (btn) {
+      btn.removeAttribute("aria-busy");
+      btn.disabled = false;
+    }
   }
 }
 
@@ -763,26 +934,101 @@ export async function castQueueToSpeaker(opts = {}) {
 /* queue mutations                                                     */
 /* ------------------------------------------------------------------ */
 
-export async function removeSongs(songIds) {
-  if (!songIds || !songIds.length) return { ok: false };
-  const before = getData().queueSongs || [];
-  const drop = new Set(songIds.map(Number));
-  try {
-    const r = await api.queueRemove(songIds);
-    if (!r.ok) {
-      notify(r.error || "移除失败", "err");
-      return r;
+/**
+ * The queue has two racing writers: an optimistic local patch and the
+ * `reloadQueue()` that follows it (plus the periodic 20s sync). A generation
+ * token makes an older response lose instead of clobbering newer local state.
+ * See `queueOptimistic.js` for the model and its tests.
+ */
+const queueWrites = createQueueWriteTracker();
+
+function beginQueueWrite() {
+  return queueWrites.begin();
+}
+
+function isStaleQueueWrite(gen) {
+  return !queueWrites.isCurrent(gen);
+}
+
+/** Index the current queue and let the registered views repaint their buttons. */
+function repaintQueueButtonsNow() {
+  const index = buildQueueIndex(getData().queueSongs);
+  for (const fn of queueRepainters) {
+    try {
+      fn(index);
+    } catch (_) {
+      /* ignore */
     }
-    // Drop the rows locally first so the list responds instantly.
+  }
+}
+
+/** Re-read the queue only if no newer mutation has taken over. */
+async function reloadQueueIfCurrent(gen) {
+  if (isStaleQueueWrite(gen)) return;
+  try {
+    const r = await api.queue();
+    if (!r || !r.ok || !shouldApplyQueueResponse(gen, queueWrites)) return;
     patch({
-      queueSongs: before.filter((s) => !drop.has(s.id)),
-      queueMeta: getData().queueMeta,
+      queueSongs: r.songs || [],
+      queueMeta: { playlistId: r.playlistId, playlistName: r.playlistName },
     });
-    await reloadQueue();
+    repaintQueueButtonsNow();
+    notifyQueueViews();
+  } catch (_) {
+    /* keep the optimistic list; the periodic sync will catch up */
+  }
+}
+
+/**
+ * Restore the pre-mutation list unless a newer mutation now owns it.
+ * @returns {boolean} true when the rollback was applied
+ */
+function rollbackQueue(before, gen) {
+  const plan = rollbackPlan({ before, token: gen, tracker: queueWrites });
+  if (!plan.patch) return false;
+  patch(plan.patch);
+  repaintQueueButtonsNow();
+  notifyQueueViews();
+  return true;
+}
+
+/**
+ * Remove songs from the fixed「播客」playlist.
+ *
+ * Order matters for perceived speed: patch the list and tell the user first,
+ * then call the API, and restore the exact previous array if the call fails.
+ *
+ * @param {number[]} songIds
+ * @returns {Promise<{ ok: boolean, error?: string, removed?: number }>}
+ */
+export async function removeSongs(songIds) {
+  const ids = (Array.isArray(songIds) ? songIds : []).map(Number).filter(Number.isFinite);
+  if (!ids.length) return { ok: false };
+  const gen = beginQueueWrite();
+  const before = snapshotQueue(getData());
+  const survivors = withoutSongs(before.queueSongs, ids);
+  const removedCount = before.queueSongs.length - survivors.length;
+
+  patch({ queueSongs: survivors, queueMeta: before.queueMeta });
+  repaintQueueButtonsNow();
+  notifyQueueViews();
+  notify(`已从播放列表移除 ${removedCount} 首`, "ok");
+
+  try {
+    const r = await api.queueRemove(ids);
+    if (!r || !r.ok) {
+      rollbackQueue(before, gen);
+      notify((r && r.error) || "移除失败，已恢复列表", "err");
+      return r || { ok: false, error: "移除失败" };
+    }
+    await reloadQueueIfCurrent(gen);
     return r;
   } catch (e) {
-    notify(String(e), "err");
+    rollbackQueue(before, gen);
+    notify("移除失败，已恢复列表", "err");
     return { ok: false, error: String(e) };
+  } finally {
+    queueWrites.end();
   }
 }
 
@@ -801,6 +1047,8 @@ export async function clearQueue() {
     danger: true,
   });
   if (!ok) return;
+  const gen = beginQueueWrite();
+  const before = snapshotQueue(getData());
   try {
     const r = await api.queueClear();
     if (!r.ok) {
@@ -809,29 +1057,49 @@ export async function clearQueue() {
     }
     // Repaint immediately: `reloadQueue` re-reads every song via `songs.getById`,
     // which on a long list made the UI look frozen for a second or two.
-    patch({ queueSongs: [], queueMeta: getData().queueMeta });
+    patch({ queueSongs: [], queueMeta: before.queueMeta });
     notify(`已清空 ${r.removed} 首`, "ok");
-    await reloadQueue();
+    repaintQueueButtonsNow();
+    notifyQueueViews();
+    await reloadQueueIfCurrent(gen);
   } catch (e) {
+    rollbackQueue(before, gen);
     notify(String(e), "err");
+  } finally {
+    queueWrites.end();
   }
 }
 
 export async function removePlayed() {
+  const before = snapshotQueue(getData());
+  const played = playedSongs(before.queueSongs);
+  if (!played.length) {
+    notify("没有已听完的节目", "muted");
+    return;
+  }
+  const gen = beginQueueWrite();
+  const drop = new Set(played.map((s) => s.id));
+  patch({
+    queueSongs: before.queueSongs.filter((s) => !drop.has(s.id)),
+    queueMeta: before.queueMeta,
+  });
+  repaintQueueButtonsNow();
+  notifyQueueViews();
+  notify(`已移除 ${drop.size} 首已听完的节目`, "ok");
+
   try {
     const r = await api.queueRemovePlayed();
-    if (!r.ok) {
-      notify(r.error || "移除已播放失败", "err");
+    if (!r || !r.ok) {
+      rollbackQueue(before, gen);
+      notify((r && r.error) || "移除已播放失败，已恢复列表", "err");
       return;
     }
-    if (!r.removed) {
-      notify("没有已听完的节目", "muted");
-      return;
-    }
-    notify(`已移除 ${r.removed} 首已听完的节目`, "ok");
-    await reloadQueue();
+    await reloadQueueIfCurrent(gen);
   } catch (e) {
-    notify(String(e), "err");
+    rollbackQueue(before, gen);
+    notify("移除已播放失败，已恢复列表", "err");
+  } finally {
+    queueWrites.end();
   }
 }
 
@@ -841,30 +1109,56 @@ export async function replaceQueueAndPlay() {
     notify("播放列表为空", "warn");
     return;
   }
+  if (!Host.hasSetQueue()) {
+    notify(SET_QUEUE_UNAVAILABLE, "err");
+    return;
+  }
   const ok = await uiConfirm({
-    title: "替换并播放",
-    message: "将用「播客」歌单替换宿主当前播放队列并开始播放，现有队列会被覆盖。",
-    okText: "替换并播放",
+    title: PLAY_FROM_START_TITLE,
+    message: PLAY_FROM_START_MESSAGE,
+    okText: PLAY_FROM_START_OK,
   });
   if (!ok) return;
   try {
-    await Host.replaceQueueAndPlay(
-      data.queueSongs.map((s) => s.id),
-      0
-    );
-    notify("已替换宿主队列并开始播放", "ok");
+    await ensureSequentialPlayMode();
+    const { ids } = queueIdsForStart(getData().queueSongs, null);
+    if (!ids.length) {
+      notify("播放列表里还没有可播放的单集", "warn");
+      return;
+    }
+    const playlistId = data.queueMeta && data.queueMeta.playlistId;
+    await Host.replaceQueueAndPlay(ids, 0, { sourcePlaylistId: playlistId });
+    const first =
+      (getData().queueSongs || []).find((s) => episodeSongId(s) === ids[0]) || getData().queueSongs[0];
+    notify(`正在播放「${(first && first.title) || "当前单集"}」`, "ok");
   } catch (e) {
     notify(String(e), "err");
   }
 }
 
 export async function reorderQueue(songIds) {
+  const ids = (Array.isArray(songIds) ? songIds : []).map(Number).filter(Number.isFinite);
+  if (!ids.length) return;
+  const gen = beginQueueWrite();
+  const before = snapshotQueue(getData());
+  patch({
+    queueSongs: reorderSongs(before.queueSongs, ids),
+    queueMeta: before.queueMeta,
+  });
+  notifyQueueViews();
   try {
-    const r = await api.queueReorder(songIds);
-    if (!r.ok) notify(r.error || "排序失败", "err");
-    await reloadQueue();
+    const r = await api.queueReorder(ids);
+    if (!r || !r.ok) {
+      rollbackQueue(before, gen);
+      notify((r && r.error) || "排序失败，已恢复列表", "err");
+      return;
+    }
+    await reloadQueueIfCurrent(gen);
   } catch (e) {
-    notify(String(e), "err");
+    rollbackQueue(before, gen);
+    notify("排序失败，已恢复列表", "err");
+  } finally {
+    queueWrites.end();
   }
 }
 

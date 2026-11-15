@@ -15,6 +15,8 @@ import {
   castToSpeaker,
   clearQueue,
   notify,
+  onEnsureQueueVisible,
+  onQueueViewChange,
   reloadQueue,
   removePlayed,
   removeSongs,
@@ -99,6 +101,9 @@ export function renderQueue() {
   const box = $("queueList");
   if (!box) return;
 
+  const replaceBtn = document.querySelector('[data-queue-act="replace"]');
+  if (replaceBtn) replaceBtn.disabled = !songs.length;
+
   if (!songs.length) {
     box.innerHTML = '<div class="empty">播放列表为空。在「更新」里加入单集。</div>';
     syncSelectUi();
@@ -107,19 +112,24 @@ export function renderQueue() {
 
   box.innerHTML = songs
     .map((s, idx) => {
+      const pending = !!s.pending;
       const selected = selectState.ids.has(s.id);
-      const lead = selectState.mode
+      const lead = pending
+        ? `<span class="q-pending-lead" aria-hidden="true"></span>`
+        : selectState.mode
         ? `<input type="checkbox" class="sel-box" data-sel="${s.id}" ${
             selected ? "checked" : ""
           } aria-label="选择" />`
         : `<span class="drag-handle" title="拖拽排序" aria-hidden="true">${icon("gripVertical", 16)}</span>`;
 
-      const more = moreMenuHtml(
+      const more = pending
+        ? ""
+        : moreMenuHtml(
         [
           { key: "cast", label: "投放到音箱", iconName: "speaker", attrs: `data-idx="${idx}"` },
           {
             key: "remove",
-            label: "从播放列表移除",
+            label: "移出列表",
             iconName: "trash",
             danger: true,
             attrs: `data-idx="${idx}"`,
@@ -139,6 +149,7 @@ export function renderQueue() {
         {
           showDate: false,
           extraClass: "q-row",
+          pending,
           leadHtml: lead,
           actions: [
             {
@@ -148,10 +159,10 @@ export function renderQueue() {
               cls: "icon-btn--star",
               attrs:
                 `aria-pressed="${s.favorited ? "true" : "false"}" ` +
-                (s.feedUrl && s.guid ? "" : "disabled"),
+                (pending || !(s.feedUrl && s.guid) ? "disabled" : ""),
             },
           ],
-          moreHtml: selectState.mode ? "" : more,
+          moreHtml: pending || selectState.mode ? "" : more,
         }
       );
       return row;
@@ -290,6 +301,8 @@ async function applyOrder(fromId, toId) {
 }
 
 export function bindQueuePanel() {
+  onQueueViewChange(() => renderQueue());
+  onEnsureQueueVisible(() => setQueueOpen(true));
   const panel = $("queuePanel");
   const backdrop = $("queueBackdrop");
   if (backdrop) backdrop.addEventListener("click", () => setQueueOpen(false));

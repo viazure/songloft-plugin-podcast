@@ -82,6 +82,25 @@ export function setButtonIcon(btn, name, size) {
   btn.innerHTML = icon(name, size || 18);
 }
 
+/**
+ * Swap the icon inside a control without touching a sibling label.
+ * Returns whether an existing `.ico` slot was updated.
+ */
+export function replaceIcon(el, name, size) {
+  if (!el || typeof el.querySelector !== "function") return false;
+  if (!ICONS[name]) return false;
+  const ico = el.querySelector(".ico");
+  if (!ico) return false;
+  let s = size;
+  if (s == null) {
+    const raw = (typeof ico.getAttribute === "function" && ico.getAttribute("style")) || "";
+    const m = /width:\s*(\d+)/.exec(String(raw));
+    s = m ? Number(m[1]) : 18;
+  }
+  ico.outerHTML = icon(name, s);
+  return true;
+}
+
 /** Fill every `[data-icon]` slot in the document. */
 export function hydrateIconSlots(root) {
   const scope = root || document;

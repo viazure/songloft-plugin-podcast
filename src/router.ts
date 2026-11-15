@@ -36,6 +36,7 @@ import {
 } from "./store";
 import { resolveEpisodeIdentity } from "./episodeIdentity";
 import { isPlayEventsSubscribed } from "./playEvents";
+import { selectRecentRows } from "./recentSelect";
 import { refreshScheduler, normalizeIntervalHours } from "./schedule";
 import { prepareEpisode, prepareEpisodes } from "./prepare";
 import {
@@ -100,36 +101,46 @@ async function recentEpisodes(limit: number) {
   const progressList = await loadAllProgress();
   const favorites = await loadFavorites();
   const favKeys = new Set(favorites.map((f) => favoriteKey(f.feedUrl, f.guid)));
-  type Row = {
-    feedUrl: string;
-    subscriptionId: string;
-    showTitle: string;
-    episode: EpisodeSummary;
-    sortMs: number;
-  };
-  const rows: Row[] = [];
-  for (const sub of subs) {
-    for (const ep of sub.episodes) {
-      rows.push({
-        feedUrl: sub.url,
-        subscriptionId: sub.id,
-        showTitle: sub.title,
-        episode: ep,
-        sortMs: ep.pubDateMs ?? sub.updatedAt,
-      });
-    }
-  }
-  rows.sort((a, b) => b.sortMs - a.sortMs);
-  return rows.slice(0, limit).map((r) => {
+
+  // Bounded selection: only the newest `limit` rows are kept, so a deep index
+  // no longer allocates one object per stored episode nor sorts them all.
+  const rows = selectRecentRows(subs, limit, (ep, sub) => ep.pubDateMs ?? sub.updatedAt);
+
+  // Progress reads are keyed by feedUrl+guid; index them once instead of
+  // scanning the progress list per row.
+  const progressByKey = buildProgressIndex(progressList);
+  const out = [];
+  for (const r of rows) {
     const id = episodeIdentityKey(r.feedUrl, r.episode.guid, r.episode.enclosureUrl);
-    const prog = findProgress(progressList, r.feedUrl, id.guid);
-    return {
+    const prog = lookupProgressIndex(progressByKey, r.feedUrl, id.guid);
+    out.push({
       subscriptionId: r.subscriptionId,
       showTitle: r.showTitle,
       favorited: favKeys.has(favoriteKey(r.feedUrl, id.guid)),
       ...publicEpisode(r.feedUrl, r.episode, prog),
-    };
-  });
+    });
+  }
+  return out;
+}
+
+/**
+ * Progress rows indexed by `normalizedFeed::guid`, mirroring `findProgress`
+ * (which accepted either the raw or the normalized feed url).
+ */
+function buildProgressIndex<T extends { feedUrl: string; guid: string }>(progressList: T[]) {
+  const byKey = new Map<string, T>();
+  for (const p of progressList) {
+    byKey.set(`${normalizeFeedUrl(p.feedUrl)}::${p.guid}`, p);
+  }
+  return byKey;
+}
+
+function lookupProgressIndex<T extends { feedUrl: string; guid: string }>(
+  index: Map<string, T>,
+  feedUrl: string,
+  guid: string
+): T | null {
+  return index.get(`${normalizeFeedUrl(feedUrl)}::${guid}`) || null;
 }
 
 function parseSongSourceData(raw: unknown): Record<string, unknown> | null {

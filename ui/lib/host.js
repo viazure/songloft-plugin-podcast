@@ -1,8 +1,9 @@
 /**
  * Host playback adapter — probes the host and drives `SongloftPlugin.player`.
  *
- * Default play path is `player.play(id)`. Replacing the host queue happens only
- * after an explicit user confirmation.
+ * `play(id)` resumes or jumps within the host's current queue.
+ * Replacing that queue goes through `replaceQueueAndPlay` → `player.setQueue`.
+ * Callers decide whether to confirm; this adapter only probes and forwards.
  */
 
 function pluginRoot() {
@@ -47,6 +48,22 @@ function requirePlayer() {
   return root.player;
 }
 
+export function hasSetQueue() {
+  try {
+    return typeof requirePlayer().setQueue === "function";
+  } catch {
+    return false;
+  }
+}
+
+function requireSetQueue() {
+  const player = requirePlayer();
+  if (typeof player.setQueue !== "function") {
+    throw new Error("宿主不支持整表播放（请在 Songloft 客户端内打开本插件，或升级宿主）");
+  }
+  return player;
+}
+
 export async function play(songId) {
   const player = requirePlayer();
   if (songId == null) return player.play();
@@ -69,14 +86,28 @@ export async function seek(seconds) {
   return requirePlayer().seek(Number(seconds));
 }
 
-/** Only call after the user confirmed replacing the host now-playing queue. */
-export async function replaceQueueAndPlay(songIds, startIndex) {
-  return requirePlayer().setQueue(
-    songIds.map(Number),
-    { startIndex: startIndex || 0 }
-  );
+/**
+ * Replace the host now-playing queue and start at startIndex.
+ * Throws if `setQueue` is missing — callers must not fall back to play(id).
+ */
+export async function replaceQueueAndPlay(songIds, startIndex, opts = {}) {
+  const player = requireSetQueue();
+  const options = { startIndex: startIndex == null ? 0 : Number(startIndex) };
+  const sourceId = opts && opts.sourcePlaylistId;
+  if (sourceId != null && sourceId !== "" && Number.isFinite(Number(sourceId))) {
+    options.sourcePlaylistId = Number(sourceId);
+  }
+  return player.setQueue(songIds.map(Number), options);
 }
 
 export async function addToHostQueue(songIds) {
   return requirePlayer().addToQueue(songIds.map(Number));
+}
+
+export async function setPlayMode(mode) {
+  const player = requirePlayer();
+  if (typeof player.setPlayMode !== "function") {
+    throw new Error("宿主不支持切换播放模式");
+  }
+  return player.setPlayMode(mode);
 }

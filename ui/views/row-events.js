@@ -18,13 +18,15 @@ import {
   flushProgress,
 } from "../lib/actions.js";
 import * as Playback from "../lib/playback.js";
+import { episodeSongId } from "../lib/playThrough.js";
 import * as Host from "../lib/host.js";
 import { openShowNote } from "./show-note.js";
 import { openChannelDialog } from "./channel-dialog.js";
 
 async function defaultPlayToggle(ep, row, items) {
   const snap = Playback.get();
-  const isCurrent = ep.songId != null && snap.current && snap.current.songId === ep.songId;
+  const songId = episodeSongId(ep);
+  const isCurrent = songId != null && snap.current && snap.current.songId === songId;
   if (isCurrent && snap.phase === "playing") {
     try {
       await Host.pause();
@@ -34,8 +36,8 @@ async function defaultPlayToggle(ep, row, items) {
     }
     return;
   }
-  if (ep.songId != null) {
-    await playEpisode({ ...episodePayload(ep), songId: ep.songId, showTitle: ep.showTitle }, { resume: true });
+  if (songId != null) {
+    await playEpisode({ ...episodePayload(ep), songId, showTitle: ep.showTitle }, { resume: true });
   } else {
     await playEpisode(episodePayload(ep));
   }
@@ -94,7 +96,7 @@ export function bindRowInteractions(box, items, handlers = {}) {
       ev.stopPropagation();
       closePopovers();
       if (handlers[act]) return handlers[act](ep, idx, btn);
-      if (act === "queue") await addToQueue(ep);
+      if (act === "queue") await addToQueue(ep, btn);
       else if (act === "fav") await toggleFavorite(ep, btn);
     });
   });
@@ -118,7 +120,7 @@ export function bindRowInteractions(box, items, handlers = {}) {
       const ep = Number.isFinite(idx) ? items[idx] : null;
       closePopovers();
       if (!ep) return;
-      if (act === "queue") await addToQueue(ep);
+      if (act === "queue") await addToQueue(ep, btn);
       else if (act === "cast") await castToSpeaker(ep.songId, { prepareIfMissing: ep });
       else if (act === "fav") await toggleFavorite(ep, null);
     });
