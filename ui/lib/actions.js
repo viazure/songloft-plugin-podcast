@@ -6,6 +6,7 @@
  */
 
 import { api } from "./api.js";
+import { resolveSpeakerCastPlan } from "./castPlan.js";
 import * as Host from "./host.js";
 import * as Playback from "./playback.js";
 import { getData, patch } from "./store.js";
@@ -17,6 +18,7 @@ import {
   appendPendingSong,
   createQueueWriteTracker,
   hasPendingSong,
+  pinQueueSongsLocally,
   playedSongs,
   reorderSongs,
   rollbackPlan,
@@ -33,11 +35,17 @@ import {
   PLAY_FROM_START_OK,
   PLAY_FROM_START_TITLE,
   episodeSongId,
-  hostQueueMatches,
   isSinglePlayMode,
   queueIdsForStart,
   readPlayMode,
 } from "./playThrough.js";
+import {
+  REPLACE_PLAYBACK_MESSAGE,
+  REPLACE_PLAYBACK_OK,
+  REPLACE_PLAYBACK_TITLE,
+  decidePlayAction,
+  readHostPlayback,
+} from "./playSession.js";
 
 /**
  * Every user-visible mutation reports back through `notify`, so playback and
@@ -165,25 +173,23 @@ export async function reloadQueue() {
     }
     if (!r.ok) {
       patch({ queueSongs: [], queueMeta: null });
+      repaintQueueButtonsNow();
+      notifyQueueViews();
       return getData();
     }
     patch({
       queueSongs: r.songs || [],
       queueMeta: { playlistId: r.playlistId, playlistName: r.playlistName },
     });
-    const data = getData();
-    for (const fn of queueRepainters) {
-      try {
-        fn(buildQueueIndex(data.queueSongs));
-      } catch (_) {
-        /* a broken repainter must not stop the queue update */
-      }
-    }
+    repaintQueueButtonsNow();
+    notifyQueueViews();
   } catch (e) {
     if (queueWrites.isPending() || !shouldApplyQueueResponse(token, queueWrites)) {
       return getData();
     }
     patch({ queueSongs: [], queueMeta: null });
+    repaintQueueButtonsNow();
+    notifyQueueViews();
     notify("读取播放列表失败（需宿主 playlists 权限）", "warn");
   }
   return getData();
@@ -222,7 +228,7 @@ function notifyQueueViews() {
 
 const queueRevealers = new Set();
 
-/** The queue panel registers here so a pending add can open the list into view. */
+/** The queue panel may register here; play/add must not call it (keep open/closed). */
 export function onEnsureQueueVisible(fn) {
   if (typeof fn !== "function") return () => {};
   queueRevealers.add(fn);
@@ -236,6 +242,76 @@ function ensureQueueVisible() {
     } catch (_) {
       /* ignore */
     }
+  }
+}
+
+/** The queue panel registers the pin animation (move-to-front transition). */
+let queuePinRunner = null;
+
+/** @param {(phase: "before"|"after", songId: number) => (void|Promise<void>)} fn */
+export function setQueuePinRunner(fn) {
+  queuePinRunner = typeof fn === "function" ? fn : null;
+}
+
+async function runQueuePinPhase(phase, songId) {
+  if (typeof queuePinRunner !== "function") return;
+  try {
+    await queuePinRunner(phase, songId);
+  } catch (_) {
+    /* animation must not block playback */
+  }
+}
+
+/** True when the play-front payload actually has the target at row 0. */
+export function playFrontTargetIsFirst(result, songId) {
+  if (!result || result.ok === false) return false;
+  const ids = Array.isArray(result.songIds) ? result.songIds.map(Number) : [];
+  return ids.length > 0 && ids[0] === Number(songId);
+}
+
+const PLAY_FRONT_FAIL =
+  "未能把这一集写到「播客」列表第一位。当前播放顺序未改，稍后可刷新列表核对。";
+
+/**
+ * Persist the optimistic pin after playback has been issued.
+ * Never apply a server list whose first id is not the target.
+ */
+async function persistPlayFrontAfterStart({ songId, episode, gen, playlistIdRef }) {
+  try {
+    const moved = await api.queuePlayFront(songId);
+    if (!playFrontTargetIsFirst(moved, songId)) {
+      notify(
+        moved && moved.error
+          ? `${PLAY_FRONT_FAIL}（${String(moved.error)}）`
+          : PLAY_FRONT_FAIL,
+        "err"
+      );
+      return;
+    }
+    if (Number.isFinite(Number(moved.playlistId))) {
+      const playlistId = Number(moved.playlistId);
+      if (playlistIdRef) playlistIdRef.value = playlistId;
+      if (moved.playlistName) {
+        const data = getData();
+        patch({
+          queueMeta: {
+            playlistId,
+            playlistName: moved.playlistName,
+          },
+          queueSongs: data.queueSongs,
+        });
+      }
+    }
+    // Confirmed first id matches; sync metadata without clobbering the pin.
+    applyQueueOrderLocally(
+      moved.songIds.map(Number).filter(Number.isFinite),
+      episode
+    );
+    await reloadQueueIfCurrent(gen);
+  } catch (e) {
+    notify(`${PLAY_FRONT_FAIL}（${String((e && e.message) || e)}）`, "err");
+  } finally {
+    queueWrites.end();
   }
 }
 
@@ -412,48 +488,57 @@ async function syncPlayStateAfterRequest(songId) {
   return false;
 }
 
-async function resumeCurrentIfSame(songId) {
-  const snap = Playback.get();
-  if (
-    songId != null &&
-    snap.current &&
-    snap.current.songId === songId &&
-    ["paused", "ended", "playing"].includes(snap.phase)
-  ) {
-    await Host.play();
-    const st = await Host.getState();
-    Playback.applyHostState(st);
-    return true;
-  }
-  return false;
+async function confirmReplacePlayback() {
+  return uiConfirm({
+    title: REPLACE_PLAYBACK_TITLE,
+    message: REPLACE_PLAYBACK_MESSAGE,
+    okText: REPLACE_PLAYBACK_OK,
+  });
 }
 
 /**
- * Play an episode (or resume the current one).
- * @param {object} ep
- * @param {{forcePrepare?: boolean, resume?: boolean}} [opts]
+ * If the host is in single-track mode, ask to switch to sequential `order`
+ * (play through the list, then stop; not loop / autoAdvance). Returns false
+ * when the user declines, so the caller can abort instead of silently playing
+ * one episode.
+ * @returns {Promise<boolean>}
  */
-async function ensureSequentialPlayMode() {
+export async function ensureSequentialPlayMode() {
   let st;
   try {
     st = await Host.getState();
   } catch {
-    return;
+    return true;
   }
-  if (!isSinglePlayMode(readPlayMode(st))) return;
+  if (!isSinglePlayMode(readPlayMode(st))) return true;
   const ok = await uiConfirm({
     title: SINGLE_MODE_TITLE,
     message: SINGLE_MODE_MESSAGE,
     okText: SINGLE_MODE_OK,
   });
-  if (!ok) return;
+  if (!ok) return false;
   try {
     await Host.setPlayMode("order");
   } catch (e) {
     notify(String((e && e.message) || e), "err");
   }
+  return true;
 }
 
+/**
+ * Play an episode from the real「播客」queue.
+ *
+ * 「播客」is the playback queue itself: the chosen episode is moved to row 0
+ * first, then the host gets `setQueue` with that whole order and startIndex 0.
+ * List rows (`{ fromWaitlist: true }`) and rows outside the list behave the
+ * same — there is no "only this episode" path and no separate listen-later copy.
+ *
+ * Cancelling a replacement confirm leaves both the music and the queue order
+ * untouched; the move only happens after the user agrees.
+ *
+ * @param {object} ep
+ * @param {{forcePrepare?: boolean, fromWaitlist?: boolean}} [opts]
+ */
 export async function playEpisode(ep, opts = {}) {
   if (!caps.available || !caps.hasPlayer) {
     notify("宿主播放器不可用", "warn");
@@ -461,6 +546,10 @@ export async function playEpisode(ep, opts = {}) {
   }
   if (!Host.hasSetQueue()) {
     notify(SET_QUEUE_UNAVAILABLE, "err");
+    return;
+  }
+  if (typeof api.queuePlayFront !== "function") {
+    notify("当前插件版本无法调整「播客」列表顺序，请刷新页面后重试", "err");
     return;
   }
 
@@ -478,11 +567,6 @@ export async function playEpisode(ep, opts = {}) {
   };
 
   try {
-    if (songId && !opts.forcePrepare && (await resumeCurrentIfSame(songId))) {
-      notify("继续播放当前单集", "ok");
-      return;
-    }
-
     if (!songId || opts.forcePrepare) {
       if (!ep.subscriptionId) {
         notify("缺少订阅信息，无法准备音频", "err");
@@ -503,62 +587,94 @@ export async function playEpisode(ep, opts = {}) {
       ctx.songId = songId;
     }
 
-    const snap0 = Playback.get();
-    let resumeAt = 0;
-    const wantResume =
-      opts.resume === true ||
-      (snap0.current &&
-        snap0.current.songId === songId &&
-        snap0.positionSec > 5 &&
-        snap0.phase !== "ended");
-    if (wantResume) {
-      if (snap0.progressCapable && snap0.positionSec > 5 && snap0.current?.songId === songId) {
-        resumeAt = snap0.positionSec;
-      } else if (ctx.feedUrl && ctx.guid && ctx.guidSource !== "enclosure") {
-        try {
-          const pr = await api.getProgressOne(ctx.feedUrl, ctx.guid);
-          if (pr && pr.ok && pr.progress && pr.progress.positionSec > 5 && !pr.progress.completed) {
-            resumeAt = pr.progress.positionSec;
-          }
-        } catch (_) {
-          /* ignore */
-        }
-      }
-    }
-
-    const membershipEp = { ...ep, ...ctx, songId };
-    const queuedNow = getData().queueSongs || [];
-    if (!isEpInQueue(membershipEp, buildQueueIndex(queuedNow)) && !hasPendingSong(queuedNow, membershipEp)) {
-      const added = await addToQueue(membershipEp, null, { quiet: true });
-      if (!added || !added.ok) {
-        notify("未能加入播放列表，仍将从这一集开始", "warn");
-      }
-    }
-
-    const { ids, startIndex } = queueIdsForStart(getData().queueSongs, songId);
-    if (!ids.length) {
+    const queueSongs = getData().queueSongs || [];
+    const queueMeta = getData().queueMeta || null;
+    // Target first, then the rest of「播客」in order. Start index is always 0.
+    const intendedIds = queueIdsForStart(queueSongs, songId).ids;
+    if (!intendedIds.length) {
       notify("没有可播放的内容", "warn");
       return;
     }
-
-    await ensureSequentialPlayMode();
 
     let hostState = null;
     try {
       hostState = await Host.getState();
     } catch (_) {
-      /* probe is optional; we will setQueue when unsure */
+      hostState = null;
     }
-    const sameList = hostQueueMatches(hostState, ids);
+    const decision = decidePlayAction({
+      host: readHostPlayback(hostState),
+      targetSongId: songId,
+      intendedIds,
+      podcastPlaylistId: queueMeta ? queueMeta.playlistId : null,
+    });
+
+    if (decision.type === "noop-playing") {
+      notify("正在播放这一集，且已在「播客」列表第一位，无需重新开始", "ok");
+      return;
+    }
+    if (decision.type === "resume") {
+      await Host.play();
+      try {
+        Playback.applyHostState(await Host.getState());
+      } catch (_) {
+        /* onStateChange will catch up */
+      }
+      notify("继续播放当前单集", "ok");
+      return;
+    }
+    if (decision.type === "confirm-replace") {
+      // Cancelling must not touch the music or the queue order.
+      const ok = await confirmReplacePlayback();
+      if (!ok) return;
+    }
+
+    const modeOk = await ensureSequentialPlayMode();
+    if (modeOk === false) return;
+
+    // Optimistic pin + play first; persist「播客」order in the background after
+    // the play request has been issued. Cancelled confirms never reach here.
+    let orderIds = decision.ids;
+    let playlistId = queueMeta ? queueMeta.playlistId : null;
+    const persistGen = beginQueueWrite();
+
+    // Play/pin must not force-open the queue panel: keep whatever open/closed
+    // state the user already has (same contract as addToQueue).
+    await runQueuePinPhase("before", songId);
+    applyQueueOrderLocally(orderIds, { ...ctx, songId, title: ctx.title, showTitle: ctx.showTitle });
+    await runQueuePinPhase("after", songId);
 
     Playback.beginPlayRequest({ ...ctx, songId });
-    if (sameList) {
-      await Host.play(songId);
-    } else {
-      const playlistId = getData().queueMeta && getData().queueMeta.playlistId;
-      await Host.replaceQueueAndPlay(ids, startIndex, { sourcePlaylistId: playlistId });
+    try {
+      await Host.replaceQueueAndPlay(orderIds, 0, {
+        sourcePlaylistId: playlistId == null ? undefined : playlistId,
+      });
+    } catch (e) {
+      Playback.playFailed(String((e && e.message) || e));
+      notify(
+        `播放请求失败：${String((e && e.message) || e)}。列表已在本页提前放到第一位，正在同步到「播客」列表。`,
+        "err"
+      );
+      void persistPlayFrontAfterStart({
+        songId,
+        episode: { ...ctx, songId },
+        gen: persistGen,
+        playlistIdRef: { value: playlistId },
+      });
+      return;
     }
-    notify(`正在播放「${ctx.title || "当前单集"}」`, "ok");
+    try {
+      await Host.setPlayMode("order");
+    } catch (_) {
+      /* older hosts may lack setPlayMode */
+    }
+    notify(`正在按「播客」列表顺序播放「${ctx.title || "当前单集"}」`, "ok");
+    void persistPlayFrontAfterStart({
+      songId,
+      episode: { ...ctx, songId },
+      gen: persistGen,
+      playlistIdRef: { value: playlistId },
+    });
 
     const ok = await syncPlayStateAfterRequest(songId);
     if (!ok) {
@@ -567,31 +683,7 @@ export async function playEpisode(ep, opts = {}) {
       return;
     }
 
-    if (resumeAt > 5) {
-      let seekOk = false;
-      try {
-        const st = await Host.getState();
-        if (st && st.current_song && st.current_song.id === songId) {
-          if (typeof st.current_time !== "number") {
-            Playback.setProgressCapable(false);
-          } else {
-            await Host.seek(resumeAt);
-            const st2 = await Host.getState();
-            Playback.applyHostState(st2);
-            seekOk =
-              st2 &&
-              typeof st2.current_time === "number" &&
-              Math.abs(st2.current_time - resumeAt) < 15;
-          }
-        }
-      } catch (_) {
-        seekOk = false;
-      }
-      notify(seekOk ? "已从上次位置继续收听" : "未能可靠续听，已从片头附近开始", seekOk ? "ok" : "warn");
-    }
-
     if (ctx.feedUrl && ctx.guid) {
-      // P0: bridge host songId → SoT key before any background play event.
       rememberMapping(songId, ctx.feedUrl, ctx.guid);
       api
         .saveProgress({
@@ -601,8 +693,6 @@ export async function playEpisode(ep, opts = {}) {
           lastPlayedAt: Date.now(),
         })
         .catch(() => {});
-      // History is its own record: it answers "what did I listen to", while
-      // progress answers "where was I". Omit positionSec so we never rewind.
       api
         .recordHistory({
           feedUrl: ctx.feedUrl,
@@ -616,7 +706,6 @@ export async function playEpisode(ep, opts = {}) {
           dedupKey: ep.dedupKey || "",
         })
         .then(() => {
-          // Only refresh the history tab if it is the one on screen.
           if (document.querySelector("#tab-history:not(.hidden)")) {
             reloadHistory().then(() => {
               if (typeof onHistoryChange === "function") onHistoryChange();
@@ -625,7 +714,6 @@ export async function playEpisode(ep, opts = {}) {
         })
         .catch(() => {});
     }
-
   } catch (e) {
     Playback.playFailed(String((e && e.message) || e));
     notify(String((e && e.message) || e), "err");
@@ -648,8 +736,7 @@ export async function togglePlayPause() {
       return;
     }
     if (cur && cur.songId) {
-      if (await resumeCurrentIfSame(cur.songId)) return;
-      await playEpisode({ ...cur, songId: cur.songId }, { resume: true });
+      await playEpisode({ ...cur, songId: cur.songId }, { fromWaitlist: true });
       return;
     }
     const first = getData().queueSongs[0];
@@ -677,13 +764,12 @@ export async function addToQueue(ep, btn, opts = {}) {
   const data = getData();
   const index = buildQueueIndex(data.queueSongs);
   if (isEpInQueue(ep, index)) {
-    if (!quiet) notify(`《${shortTitle(ep.title)}》已在播放列表「播客」中`, "warn");
+    if (!quiet) notify(`《${shortTitle(ep.title)}》已经在「播客」列表里`, "warn");
     return { ok: true, already: true };
   }
   if (hasPendingSong(data.queueSongs, ep)) {
     if (!quiet) {
       notify(`正在加入《${shortTitle(ep.title)}》…`, "muted");
-      ensureQueueVisible();
     }
     return { ok: false, pending: true };
   }
@@ -698,7 +784,7 @@ export async function addToQueue(ep, btn, opts = {}) {
     queueMeta: before.queueMeta,
   });
   notifyQueueViews();
-  ensureQueueVisible();
+  // Stay on the caller's view; success toast is enough. Play/cast still opens the panel.
   try {
     const r = await api.queueAdd({
       subscriptionId: ep.subscriptionId,
@@ -707,15 +793,15 @@ export async function addToQueue(ep, btn, opts = {}) {
     });
     if (!r.ok) {
       rollbackQueue(before, gen);
-      notify(r.error || "加入播放列表失败（准备音频）", "err");
+      notify(r.error || "加入「播客」列表失败（准备音频）", "err");
       return { ok: false };
     }
     const name = r.playlistName || "播客";
     if (!quiet) {
       const bits = [];
-      if (r.added > 0) bits.push(`已将《${shortTitle(ep.title)}》加入播放列表「${name}」`);
-      else if (r.skipped > 0) bits.push(`《${shortTitle(ep.title)}》已在播放列表「${name}」中`);
-      else bits.push(`未能加入播放列表「${name}」`);
+      if (r.added > 0) bits.push(`已将《${shortTitle(ep.title)}》加入「播客」列表末尾`);
+      else if (r.skipped > 0) bits.push(`《${shortTitle(ep.title)}》已经在「播客」列表里`);
+      else bits.push("未能加入「播客」列表");
       notify(bits.join(""), r.added > 0 ? "ok" : "warn");
     }
     await reloadQueueIfCurrent(gen);
@@ -797,7 +883,7 @@ function castUnavailableDialog(reason, errorText) {
       (errorText ? `<p class="muted">${escapeHtml(errorText)}</p>` : "");
   } else {
     body =
-      `<p>一键投放通过「智能音箱」插件（entryPath <code>miot</code>）把单集 URL 推给音箱。</p>` +
+      `<p>投放通过「智能音箱」插件（entryPath <code>miot</code>）让小爱音箱播放「播客」歌单。</p>` +
       `<p class="muted">请先在 Songloft 的插件市场安装，并确认该插件已启用。</p>` +
       (errorText ? `<p class="muted">${escapeHtml(errorText)}</p>` : "");
   }
@@ -870,48 +956,68 @@ export async function castToSpeaker(songId, opts = {}) {
       return;
     }
 
-    notify("正在投放到小爱音箱…", "muted");
-    const r = await api.castMiot(id, opts.deviceId);
-    if (r && r.ok) {
-      notify(`已投放到${r.deviceName ? `「${r.deviceName}」` : "小爱音箱"}`, "ok");
+    // Both the "settings test cast" and a normal cast play the same persistent
+    // 「播客」queue: the server moves this episode to row 0 and starts there.
+    const plan = resolveSpeakerCastPlan({
+      songId: id,
+      forceSingle: opts.forceSingle,
+      queueSongs: getData().queueSongs,
+    });
+    if (!plan) {
+      notify("没有可投放的单集", "warn");
       return;
     }
-    if (
-      r &&
-      (r.reason === "miot_unavailable" ||
-        r.reason === "miot_no_device" ||
-        r.reason === "miot_device_offline")
-    ) {
-      clearToast();
-      await castUnavailableDialog(r.reason, r.error);
-      return;
-    }
-    notify((r && r.error) || "投放失败", "err");
+    await castQueueToSpeaker({
+      deviceId: opts.deviceId,
+      songIds: plan.songIds,
+      songId: plan.songId,
+    });
   } catch (e) {
     notify(String((e && e.message) || e), "err");
   }
 }
 
 /**
- * Push the whole「播客」playlist to the speaker.
+ * Play「播客」on the speaker, starting at the chosen episode.
  *
- * Unlike `castToSpeaker` (one stream, no next-track handling), this hands MIoT a
- * playlist id so the device owns the queue and can auto-advance.
+ * The server moves that episode to the front of the persistent「播客」playlist
+ * (identified only by the id this plugin saved) and asks MIoT to play it in
+ * order from index 0. No separate snapshot table is created or refilled, and a
+ * failure or concurrency never produces a spare one.
+ *
+ * The order change happens before the play request, so it can stand even when
+ * casting fails; the copy says so instead of promising otherwise.
  */
 export async function castQueueToSpeaker(opts = {}) {
   const data = getData();
-  if (!data.queueSongs.length) {
-    notify("播放列表为空，先添加几集再投放", "warn");
+  const songIds = (
+    Array.isArray(opts.songIds) && opts.songIds.length
+      ? opts.songIds
+      : (data.queueSongs || []).map((s) => s && s.id)
+  )
+    .map((id) => Number(id))
+    .filter((id) => Number.isFinite(id) && id > 0);
+  if (!songIds.length) {
+    notify("「播客」列表为空，先添加几集再投放", "warn");
     return;
   }
+  const songId =
+    Number.isFinite(Number(opts.songId)) && Number(opts.songId) > 0
+      ? Number(opts.songId)
+      : songIds[0];
   try {
-    notify(`正在把 ${data.queueSongs.length} 集推送到音箱…`, "muted");
-    const r = await api.castMiotPlaylist(null, opts.deviceId);
+    notify("正在把这一集移到「播客」第一位并投放…", "muted");
+    const r = await api.castMiotPlaylist({
+      deviceId: opts.deviceId,
+      songIds,
+      songId,
+    });
     if (r && r.ok) {
       notify(
-        `已投放到${r.deviceName ? `「${r.deviceName}」` : "小爱音箱"}：${r.count} 集排队播放`,
+        `已投放到${r.deviceName ? `「${r.deviceName}」` : "小爱音箱"}：从这一集按「播客」列表顺序播放`,
         "ok"
       );
+      await reloadQueue();
       return;
     }
     if (
@@ -924,9 +1030,18 @@ export async function castQueueToSpeaker(opts = {}) {
       await castUnavailableDialog(r.reason, r.error);
       return;
     }
-    notify((r && r.error) || "投放失败", "err");
+    // Failure copy must be honest: the list may already be reordered.
+    const orderNote = r && r.orderChanged === false
+      ? "「播客」列表顺序未改变。"
+      : "「播客」列表顺序会在播放请求之前调整，可能已经改成从这一集开始。";
+    notify(`${(r && r.error) || "投放失败"} ${orderNote}`.trim(), "err");
+    if (r && r.orderChanged !== false) reloadQueue().catch(() => {});
   } catch (e) {
-    notify(String((e && e.message) || e), "err");
+    notify(
+      `投放失败：${String((e && e.message) || e)}。「播客」列表顺序可能在请求前已调整。`,
+      "err"
+    );
+    reloadQueue().catch(() => {});
   }
 }
 
@@ -977,6 +1092,24 @@ async function reloadQueueIfCurrent(gen) {
   } catch (_) {
     /* keep the optimistic list; the periodic sync will catch up */
   }
+}
+
+/**
+ * Reflect the server's new「播客」order locally, without a full re-read.
+ *
+ * Only rows already known locally are reordered: an episode that was inserted
+ * by the move is not in `queueSongs` yet, and inventing a row without its
+ * episode data would make the panel show a broken item. The periodic sync (or
+ * opening the panel) fills that in.
+ */
+function applyQueueOrderLocally(ids, episode) {
+  const data = getData();
+  const songs = data.queueSongs || [];
+  const next = pinQueueSongsLocally(songs, ids, episode);
+  patch({ queueSongs: next, queueMeta: data.queueMeta });
+  repaintQueueButtonsNow();
+  notifyQueueViews();
+  return next;
 }
 
 /**
@@ -1035,14 +1168,12 @@ export async function removeSongs(songIds) {
 export async function clearQueue() {
   const data = getData();
   if (!data.queueSongs.length) {
-    notify("播放列表已空", "muted");
+    notify("「播客」列表已空", "muted");
     return;
   }
   const ok = await uiConfirm({
-    title: "清空播放列表",
-    message: `将清空固定歌单「${data.queueMeta ? data.queueMeta.playlistName : "播客"}」中的 ${
-      data.queueSongs.length
-    } 首，不会删除远程音频文件。`,
+    title: "清空「播客」列表",
+    message: `将清空「播客」列表中的 ${data.queueSongs.length} 首，不会删除远程音频文件，也不会删除这张歌单。`,
     okText: "清空",
     danger: true,
   });
@@ -1106,7 +1237,7 @@ export async function removePlayed() {
 export async function replaceQueueAndPlay() {
   const data = getData();
   if (!data.queueSongs.length) {
-    notify("播放列表为空", "warn");
+    notify("「播客」列表为空", "warn");
     return;
   }
   if (!Host.hasSetQueue()) {
@@ -1120,14 +1251,22 @@ export async function replaceQueueAndPlay() {
   });
   if (!ok) return;
   try {
-    await ensureSequentialPlayMode();
+    const modeOk = await ensureSequentialPlayMode();
+    if (modeOk === false) return;
     const { ids } = queueIdsForStart(getData().queueSongs, null);
     if (!ids.length) {
-      notify("播放列表里还没有可播放的单集", "warn");
+      notify("「播客」列表里还没有可播放的单集", "warn");
       return;
     }
-    const playlistId = data.queueMeta && data.queueMeta.playlistId;
-    await Host.replaceQueueAndPlay(ids, 0, { sourcePlaylistId: playlistId });
+    const meta = getData().queueMeta;
+    await Host.replaceQueueAndPlay(ids, 0, {
+      sourcePlaylistId: meta ? meta.playlistId : undefined,
+    });
+    try {
+      await Host.setPlayMode("order");
+    } catch (_) {
+      /* older hosts may lack setPlayMode */
+    }
     const first =
       (getData().queueSongs || []).find((s) => episodeSongId(s) === ids[0]) || getData().queueSongs[0];
     notify(`正在播放「${(first && first.title) || "当前单集"}」`, "ok");

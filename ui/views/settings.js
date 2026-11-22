@@ -29,19 +29,11 @@ export async function loadSettings() {
     }
     const hint = $("maxEpisodesHint");
     if (hint) {
-      hint.textContent = `可填 1–${limit}，默认 50。超过 ${limit} 会自动收敛到 ${limit}。`;
+      hint.textContent = `可填 1–${limit}，默认 50。这是自动刷新窗口，不是历史索引上限；超过 ${limit} 会自动收敛到 ${limit}。更早的节目请在频道页按需索引（按频道选择，不受此滑块控制）。`;
     }
     const meta = $("scheduleMeta");
     if (meta) {
       meta.textContent = "下次：" + (r.scheduleNextDueAt ? fmtTime(r.scheduleNextDueAt) : "—");
-    }
-    const eventsNote = $("playEventsNote");
-    if (eventsNote) {
-      // Do not pretend host-bar / other-entry plays are fully covered when
-      // songloft.events subscription is inactive (missing permission or old host).
-      eventsNote.textContent = r.playEventsActive
-        ? "进度与收听历史保存在本插件（按节目 feed + 单集 guid）。已订阅宿主播放事件：在宿主歌单 / 底栏播放且能解出 feed+guid 时也会记账；解不出则不写脏数据。"
-        : "进度与收听历史保存在本插件（按节目 feed + 单集 guid）。当前未启用宿主播放事件订阅：只有在本插件页点播 / 入队时会写入历史；宿主其它入口的播放不会自动记入。";
     }
   } catch (_) {
     /* settings are non-critical on boot */
@@ -202,7 +194,10 @@ export function bindSettings() {
       }
       testCast.disabled = true;
       try {
-        await castToSpeaker(cur.songId, { deviceId: selectedDeviceId || undefined });
+        await castToSpeaker(cur.songId, {
+          deviceId: selectedDeviceId || undefined,
+          forceSingle: true,
+        });
       } finally {
         testCast.disabled = false;
       }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   appendPendingSong,
+  pinQueueSongsLocally,
   createQueueWriteTracker,
   hasPendingSong,
   isPendingQueueSong,
@@ -147,5 +148,23 @@ describe("pending add placeholder", () => {
     const existing = [{ id: 9, feedUrl: ep.feedUrl, guid: ep.guid, title: "No.233" }];
     expect(appendPendingSong(existing, ep)).toEqual(existing);
     expect(hasPendingSong(existing, ep)).toBe(false);
+  });
+});
+
+describe("pinQueueSongsLocally", () => {
+  it("moves an existing row to the front and keeps the rest", () => {
+    expect(pinQueueSongsLocally(SONGS, [2, 1, 3], null).map((s) => s.id)).toEqual([2, 1, 3]);
+  });
+
+  it("inserts a missing target at the front using episode metadata", () => {
+    const next = pinQueueSongsLocally(SONGS, [9, 1, 2, 3], { title: "new", showTitle: "Show" });
+    expect(next.map((s) => s.id)).toEqual([9, 1, 2, 3]);
+    expect(next[0].title).toBe("new");
+    expect(next[0].artist).toBe("Show");
+  });
+
+  it("does not drop local rows that the server id list omitted", () => {
+    const next = pinQueueSongsLocally(SONGS, [3, 1], null);
+    expect(next.map((s) => s.id)).toEqual([3, 1, 2]);
   });
 });

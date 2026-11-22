@@ -14,6 +14,16 @@
  * address of this host, not from localhost.
  */
 
+import {
+  parseMiotGroups,
+  parsePlayerStatus,
+  type DeviceTarget,
+  type MiotGroup,
+  type PlayAttempt,
+  type PlayerState,
+} from "./castSlots";
+import { attachIssued, fetchWithDeadline, playAttemptFromUnknown } from "./httpDeadline";
+
 export const MIOT_ENTRY_PATH = "miot";
 const HTTP_TIMEOUT_MS = 8000;
 
@@ -87,22 +97,45 @@ async function miotFetch(path: string, init?: RequestInit): Promise<Response> {
   });
 }
 
-async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await miotFetch(path, init);
-  const text = await res.text();
-  let body: unknown = null;
+type FetchJsonInit = RequestInit & { timeoutMs?: number };
+
+async function fetchJson<T>(path: string, init?: FetchJsonInit): Promise<T> {
+  const timeoutMs = init && typeof init.timeoutMs === "number" ? init.timeoutMs : 0;
+  const rest: RequestInit = { ...(init || {}) };
+  delete (rest as FetchJsonInit).timeoutMs;
+
+  const base = await hostBase();
+  const token = await hostToken();
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    ...(rest.headers ? (rest.headers as Record<string, string>) : {}),
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (rest.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+
+  const res = await fetchWithDeadline(
+    `${base}/api/v1/jsplugin/${MIOT_ENTRY_PATH}${path}`,
+    { method: rest.method, headers, body: rest.body },
+    { timeoutMs }
+  );
   try {
-    body = text ? JSON.parse(text) : null;
-  } catch {
-    body = null;
+    const text = await res.text();
+    let body: unknown = null;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      body = null;
+    }
+    if (!res.ok) {
+      const err =
+        (body && typeof body === "object" && (body as { error?: string }).error) ||
+        `HTTP ${res.status}`;
+      throw new Error(String(err));
+    }
+    return body as T;
+  } catch (e) {
+    throw attachIssued(e, true);
   }
-  if (!res.ok) {
-    const err =
-      (body && typeof body === "object" && (body as { error?: string }).error) ||
-      `HTTP ${res.status}`;
-    throw new Error(String(err));
-  }
-  return body as T;
 }
 
 /* ------------------------------------------------------------------ */
@@ -343,7 +376,7 @@ async function buildSongUrl(songId: number): Promise<string> {
  */
 export async function castPlaylistToMiot(
   playlistId: number,
-  options: { deviceId?: string; startIndex?: number } = {}
+  options: { deviceId?: string; startIndex?: number; songId?: number; playMode?: string } = {}
 ): Promise<CastResult & { playlistId?: number; queued?: number }> {
   if (typeof playlistId !== "number" || !Number.isFinite(playlistId) || playlistId <= 0) {
     return { ok: false, reason: "cast_failed", error: "缺少有效的歌单 ID" };
@@ -386,6 +419,10 @@ export async function castPlaylistToMiot(
           device_id: target.deviceId,
           playlist_id: playlistId,
           start_index: options.startIndex || 0,
+          play_mode: options.playMode || "order",
+          ...(typeof options.songId === "number" && Number.isFinite(options.songId) && options.songId > 0
+            ? { song_id: options.songId }
+            : {}),
         }),
       }
     );
@@ -531,6 +568,98 @@ export async function castSongToMiot(
     return flattenDevices(res.data || []);
   } catch (_) {
     return [];
+  }
+}
+
+
+export function pickDeviceTarget(devices: DeviceTarget[], requestedId?: string): DeviceTarget | null {
+  const wanted = String(requestedId || "").trim();
+  if (wanted) return devices.find((d) => d.deviceId === wanted) || null;
+  return devices.find((d) => d.online) || devices[0] || null;
+}
+
+export async function listMiotDeviceTargets(): Promise<{
+  ok: boolean;
+  reason?: CastReason;
+  error?: string;
+  devices: DeviceTarget[];
+}> {
+  try {
+    const res = await fetchJson<DevicesResponse>("/mina/devices", { method: "GET" });
+    if (res && res.success === false) {
+      return { ok: false, reason: "cast_failed", error: String(res.error || "读取设备失败"), devices: [] };
+    }
+    const blocks = Array.isArray(res.data) ? res.data : [];
+    const devices: DeviceTarget[] = flattenDevices(blocks).map((d) => ({
+      accountId: d.accountId,
+      deviceId: d.deviceId,
+      deviceName: d.name,
+      online: d.online,
+    }));
+    return { ok: true, devices };
+  } catch (e) {
+    const msg = String((e as { message?: string })?.message ?? e ?? "无法连接智能音箱插件");
+    const missing = /HTTP 40[0-9]|not found|plugin_unavailable/i.test(msg);
+    return {
+      ok: false,
+      reason: "miot_unavailable",
+      error: missing ? "未安装或未启用「智能音箱」插件" : msg,
+      devices: [],
+    };
+  }
+}
+
+export async function fetchMiotGroups(): Promise<MiotGroup[] | null> {
+  try {
+    const body = await fetchJson<unknown>("/groups", { method: "GET", timeoutMs: HTTP_TIMEOUT_MS });
+    return parseMiotGroups(body);
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchMiotPlayerStatus(accountId: string, deviceId: string): Promise<PlayerState | null> {
+  const acc = String(accountId || "").trim();
+  const dev = String(deviceId || "").trim();
+  if (!acc || !dev) return null;
+  try {
+    const qs = `?account_id=${encodeURIComponent(acc)}&device_id=${encodeURIComponent(dev)}`;
+    const body = await fetchJson<unknown>(`/player/status${qs}`, { method: "GET", timeoutMs: HTTP_TIMEOUT_MS });
+    return parsePlayerStatus(body);
+  } catch {
+    return null;
+  }
+}
+
+export async function playPlaylistOnDevice(
+  playlistId: number,
+  target: DeviceTarget,
+  options: { startIndex?: number; songId?: number; playMode?: string } = {}
+): Promise<PlayAttempt> {
+  try {
+    const res = await fetchJson<{ success?: boolean; error?: string }>(
+      "/player/play",
+      {
+        method: "POST",
+        timeoutMs: HTTP_TIMEOUT_MS,
+        body: JSON.stringify({
+          account_id: target.accountId,
+          device_id: target.deviceId,
+          playlist_id: playlistId,
+          start_index: options.startIndex || 0,
+          play_mode: options.playMode || "order",
+          ...(typeof options.songId === "number" && Number.isFinite(options.songId) && options.songId > 0
+            ? { song_id: options.songId }
+            : {}),
+        }),
+      }
+    );
+    if (res && res.success === false) {
+      return { ok: false, playIssued: true, uncertain: false, error: String(res.error || "音箱拒绝播放") };
+    }
+    return { ok: true, playIssued: true, uncertain: false };
+  } catch (e) {
+    return playAttemptFromUnknown(e);
   }
 }
 

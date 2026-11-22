@@ -24,9 +24,10 @@ function metaLine(ep) {
 }
 
 /** Open the ShowNote dialog for an episode. */
-export async function openShowNote(ep) {
+export async function openShowNote(ep, opts = {}) {
   if (!ep) return;
   context = ep;
+  const fromWaitlist = !!opts.fromWaitlist;
 
   const body = document.createElement("div");
   body.className = "sn-frame";
@@ -64,7 +65,7 @@ export async function openShowNote(ep) {
     `</div>`;
   body.innerHTML = html;
 
-  const [playAct, queueAct, castAct, favAct] = shownoteFootActions(ep);
+  const [playAct, queueAct, castAct, favAct] = shownoteFootActions(ep, { fromWaitlist });
   openModal({
     title: "",
     body,
@@ -74,7 +75,7 @@ export async function openShowNote(ep) {
       {
         ...playAct,
         onClick: () => {
-          playEpisode(episodePayload(ep));
+          playEpisode(episodePayload(ep), { fromWaitlist });
         },
       },
       {

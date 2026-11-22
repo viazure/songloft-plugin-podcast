@@ -17,6 +17,8 @@ const state = {
   hostHint: null,
   progressCapable: true,
   hostSongId: null,
+  /** Host getState source_playlist_id; locks only plugin「播客」sessions. */
+  sourcePlaylistId: null,
 };
 
 /**
@@ -117,6 +119,15 @@ export function markAudioFocusPause() {
 /** Fold a host `getState()` / state-change payload into the snapshot. */
 export function applyHostState(hostState) {
   if (!hostState) return;
+
+  {
+    const raw =
+      hostState.source_playlist_id != null
+        ? hostState.source_playlist_id
+        : hostState.sourcePlaylistId;
+    const n = Number(raw);
+    set({ sourcePlaylistId: Number.isFinite(n) && n > 0 ? n : null });
+  }
 
   const playing = !!hostState.is_playing;
   const cur = hostState.current_song;

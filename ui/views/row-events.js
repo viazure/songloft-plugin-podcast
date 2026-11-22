@@ -23,10 +23,11 @@ import * as Host from "../lib/host.js";
 import { openShowNote } from "./show-note.js";
 import { openChannelDialog } from "./channel-dialog.js";
 
-async function defaultPlayToggle(ep, row, items) {
+async function defaultPlayToggle(ep, row, items, opts = {}) {
   const snap = Playback.get();
   const songId = episodeSongId(ep);
   const isCurrent = songId != null && snap.current && snap.current.songId === songId;
+  const playOpts = { fromWaitlist: !!opts.fromWaitlist };
   if (isCurrent && snap.phase === "playing") {
     try {
       await Host.pause();
@@ -37,9 +38,9 @@ async function defaultPlayToggle(ep, row, items) {
     return;
   }
   if (songId != null) {
-    await playEpisode({ ...episodePayload(ep), songId, showTitle: ep.showTitle }, { resume: true });
+    await playEpisode({ ...episodePayload(ep), songId, showTitle: ep.showTitle }, playOpts);
   } else {
-    await playEpisode(episodePayload(ep));
+    await playEpisode(episodePayload(ep), playOpts);
   }
 }
 
@@ -50,16 +51,17 @@ async function defaultPlayToggle(ep, row, items) {
  */
 export function bindRowInteractions(box, items, handlers = {}) {
   if (!box) return;
+  const playOpts = handlers.playOpts || {};
 
   box.querySelectorAll("[data-title-tap]").forEach((btn) => {
     const idx = Number(btn.getAttribute("data-idx"));
     const ep = items[idx];
     if (!ep) return;
-    btn.addEventListener("click", () => openShowNote(ep));
+    btn.addEventListener("click", () => openShowNote(ep, playOpts));
     btn.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter" || ev.key === " ") {
         ev.preventDefault();
-        openShowNote(ep);
+        openShowNote(ep, playOpts);
       }
     });
   });
@@ -83,7 +85,7 @@ export function bindRowInteractions(box, items, handlers = {}) {
     btn.addEventListener("click", async (ev) => {
       ev.stopPropagation();
       if (handlers.play) return handlers.play(ep, idx, btn);
-      await defaultPlayToggle(ep, btn.closest("[data-row]"), items);
+      await defaultPlayToggle(ep, btn.closest("[data-row]"), items, playOpts);
     });
   });
 

@@ -2,16 +2,46 @@
 
 let timer = null;
 let el = null;
+/** Preferred mount parent while a native <dialog> top-layer modal is open. */
+let mountParent = null;
+
+function resolveMount() {
+  if (mountParent && mountParent.isConnected) return mountParent;
+  return document.body;
+}
 
 function ensure() {
-  if (el && el.isConnected) return el;
+  const host = resolveMount();
+  if (el && el.isConnected) {
+    if (el.parentElement !== host) host.appendChild(el);
+    return el;
+  }
   el = document.createElement("div");
   el.id = "toast";
   el.className = "toast";
   el.setAttribute("role", "status");
   el.setAttribute("aria-live", "polite");
-  document.body.appendChild(el);
+  host.appendChild(el);
   return el;
+}
+
+/**
+ * While #appModal is open (showModal top layer), toast must live inside the
+ * dialog or it stays under the list. Pass the dialog node, or null/body to restore.
+ * Moves an already-visible toast with the same node so the message stays up.
+ */
+export function setToastMount(parent) {
+  mountParent =
+    parent && typeof parent.appendChild === "function" && parent.isConnected
+      ? parent
+      : null;
+  if (!el) return;
+  const host = resolveMount();
+  if (el.isConnected) {
+    if (el.parentElement !== host) host.appendChild(el);
+  } else if (el.classList.contains("show")) {
+    host.appendChild(el);
+  }
 }
 
 const SILENT = /^(继续播放|已开始播放|已继续收听|继续收听|正在加载剧集…)$/;

@@ -23,6 +23,7 @@ export const ICONS = {
   checkCircle:
     '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline>',
   x: '<path d="M18 6 6 18"></path><path d="m6 6 12 12"></path>',
+  arrowLeft: '<path d="m12 19-7-7 7-7"></path><path d="M19 12H5"></path>',
   moreHorizontal:
     '<circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle>',
   moreVertical:

@@ -129,11 +129,17 @@ export function renderHistory() {
   if (!box) return;
   disposeHistoryCovers();
   const all = getData().history || [];
+  box.classList.remove("is-skeleton");
   if (!all.length) {
+    if (box.dataset.bootPending === "1") {
+      syncSelectUi();
+      return;
+    }
     box.innerHTML = '<div class="empty">还没有收听记录</div>';
     syncSelectUi();
     return;
   }
+  delete box.dataset.bootPending;
 
   const items = filtered(all);
   if (!items.length) {
@@ -327,8 +333,9 @@ export function bindHistoryToolbar() {
   });
 }
 
-/** Called when switching to the tab. */
+/** Called when switching to the tab. Paint cache first so a slow reload cannot blank the view. */
 export async function loadHistoryView() {
+  renderHistory();
   await reloadHistory();
   renderHistory();
 }

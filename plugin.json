@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/songloft-org/plugin-toolchain/main/schemas/plugin.schema.json",
   "name": "播客",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "泛用型播客：订阅公开 RSS，本机进度与收听历史；固定歌单「播客」播放；支持投放到小爱音箱",
   "author": "viazure",
   "homepage": "https://github.com/viazure/songloft-plugin-podcast",
@@ -18,8 +18,8 @@
     "inter-plugin"
   ],
   "updateUrl": "https://raw.githubusercontent.com/viazure/songloft-plugin-podcast/main/plugin.json",
-  "download_url": "https://github.com/viazure/songloft-plugin-podcast/releases/download/v0.4.0/podcast.jsplugin.zip",
+  "download_url": "https://github.com/viazure/songloft-plugin-podcast/releases/download/v0.5.0/podcast.jsplugin.zip",
   "icon": "icon.png",
-  "entryHash": "e4e293e46a4eba1c0429fd82eab94bdd20a0bde8dd00166d2b7024b914d51e3b",
-  "zipHash": "0c9fcf007aebde5a281fafc34110cf3ec6f7c7664be9361263fee437aae4262f"
+  "entryHash": "65c8fba0bc7c4d4e240f6b607ddeadab9cb4719677a9564b0f6d478f27b28e62",
+  "zipHash": "1ce9a8e14ed2d0484e8810a5626536ec80ddf959f1e2162bfeba78dcd1c6807f"
 }

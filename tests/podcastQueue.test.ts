@@ -6,6 +6,7 @@ import {
   listPodcastQueue,
   clearPodcastQueue,
   moveInPodcastQueue,
+  moveToFrontInPodcastQueue,
   removeFromPodcastQueue,
   type PlaylistsApi,
 } from "../src/podcastQueue";
@@ -29,11 +30,17 @@ function installSongloftMock() {
 
 function mockApi(initial: Array<{ id: number; name: string; songs: number[] }>): PlaylistsApi & {
   state: typeof initial;
+  reorderCalls: Array<{ playlistId: number; songIds: number[] }>;
 } {
   const state = initial.map((p) => ({ ...p, songs: [...p.songs] }));
   let nextId = 100;
-  const api: PlaylistsApi & { state: typeof state } = {
+  const reorderCalls: Array<{ playlistId: number; songIds: number[] }> = [];
+  const api: PlaylistsApi & {
+    state: typeof state;
+    reorderCalls: typeof reorderCalls;
+  } = {
     state,
+    reorderCalls,
     async list() {
       return state.map((p) => ({
         id: p.id,
@@ -113,6 +120,7 @@ function mockApi(initial: Array<{ id: number; name: string; songs: number[] }>):
       if (!p) throw new Error("missing");
       if (songIds.length !== p.songs.length) throw new Error("length mismatch");
       p.songs = [...songIds];
+      reorderCalls.push({ playlistId, songIds: [...songIds] });
     },
   };
   return api;
@@ -140,6 +148,20 @@ describe("podcastQueue", () => {
     expect(api.state.length).toBe(1);
   });
 
+  it("describes a new「播客」playlist as the playback queue, not a listen-later plan", async () => {
+    let created: { name: string; description?: string } | null = null;
+    const api = mockApi([]);
+    const original = api.create.bind(api);
+    api.create = async (input) => {
+      created = input;
+      return original(input as never);
+    };
+    await ensurePodcastPlaylist(api);
+    expect(created!.name).toBe("播客");
+    expect(String(created!.description)).toContain("播放队列");
+    expect(String(created!.description)).not.toContain("待听");
+  });
+
   it("append dedupes and remove works", async () => {
     const api = mockApi([]);
     const r1 = await appendToPodcastQueue(api, [1, 2, 2]);
@@ -154,6 +176,14 @@ describe("podcastQueue", () => {
     expect(listed2.songs.map((s) => s.id)).toEqual([1, 3]);
   });
 
+  it("append keeps appending at the end instead of jumping to the front", async () => {
+    const api = mockApi([]);
+    await appendToPodcastQueue(api, [1, 2]);
+    await appendToPodcastQueue(api, [3]);
+    expect(api.reorderCalls).toEqual([]);
+    expect(api.state[0].songs).toEqual([1, 2, 3]);
+  });
+
   it("moveInPodcastQueue reorders via host reorder", async () => {
     const api = mockApi([]);
     await appendToPodcastQueue(api, [1, 2, 3]);
@@ -162,6 +192,83 @@ describe("podcastQueue", () => {
     expect(up.songIds).toEqual([1, 3, 2]);
     const listed = await listPodcastQueue(api);
     expect(listed.songs.map((s) => s.id)).toEqual([1, 3, 2]);
+  });
+
+  it("moveToFrontInPodcastQueue moves an existing row to index 0", async () => {
+    const api = mockApi([]);
+    await appendToPodcastQueue(api, [1, 2, 3]);
+    const r = await moveToFrontInPodcastQueue(api, 3);
+    expect(r.moved).toBe(true);
+    expect(r.added).toBe(0);
+    expect(r.songIds).toEqual([3, 1, 2]);
+    const listed = await listPodcastQueue(api);
+    expect(listed.songs.map((s) => s.id)).toEqual([3, 1, 2]);
+  });
+
+  it("moveToFrontInPodcastQueue inserts a song that is not in the list at index 0", async () => {
+    const api = mockApi([]);
+    await appendToPodcastQueue(api, [1, 2]);
+    const r = await moveToFrontInPodcastQueue(api, 9);
+    expect(r.moved).toBe(true);
+    expect(r.added).toBe(1);
+    expect(r.songIds).toEqual([9, 1, 2]);
+    const listed = await listPodcastQueue(api);
+    expect(listed.songs.map((s) => s.id)).toEqual([9, 1, 2]);
+  });
+
+  it("moveToFrontInPodcastQueue does not reorder when the song is already first", async () => {
+    const api = mockApi([]);
+    await appendToPodcastQueue(api, [1, 2, 3]);
+    const r = await moveToFrontInPodcastQueue(api, 1);
+    expect(r.moved).toBe(false);
+    expect(api.reorderCalls).toEqual([]);
+    const listed = await listPodcastQueue(api);
+    expect(listed.songs.map((s) => s.id)).toEqual([1, 2, 3]);
+  });
+
+  it("moveToFrontInPodcastQueue ignores an invalid id", async () => {
+    const api = mockApi([]);
+    await appendToPodcastQueue(api, [1, 2]);
+    const r = await moveToFrontInPodcastQueue(api, 0);
+    expect(r.moved).toBe(false);
+    expect(r.songIds).toEqual([1, 2]);
+    expect(api.reorderCalls).toEqual([]);
+  });
+
+  it("moveToFrontInPodcastQueue re-reads getSongs after reorder and returns host order", async () => {
+    const api = mockApi([]);
+    await appendToPodcastQueue(api, [1, 2, 3]);
+    let getSongsAfterReorder = 0;
+    const originalGet = api.getSongs.bind(api);
+    const originalReorder = api.reorder.bind(api);
+    api.reorder = async (playlistId, songIds) => {
+      await originalReorder(playlistId, songIds);
+      const wrappedGet = api.getSongs;
+      api.getSongs = async (id) => {
+        getSongsAfterReorder += 1;
+        return wrappedGet(id);
+      };
+    };
+    const r = await moveToFrontInPodcastQueue(api, 3);
+    expect(r.moved).toBe(true);
+    expect(r.songIds).toEqual([3, 1, 2]);
+    expect(getSongsAfterReorder).toBe(1);
+    // restore not required; test ends here
+    void originalGet;
+  });
+
+  it("moveToFrontInPodcastQueue reports moved=false when the host reorder does not stick", async () => {
+    const api = mockApi([]);
+    await appendToPodcastQueue(api, [1, 2, 3]);
+    const original = api.reorder.bind(api);
+    api.reorder = async (playlistId, songIds) => {
+      // Pretend the host accepted the call but left the order unchanged.
+      api.reorderCalls.push({ playlistId, songIds: [...songIds] });
+      void original;
+    };
+    const r = await moveToFrontInPodcastQueue(api, 3);
+    expect(r.moved).toBe(false);
+    expect(r.songIds).toEqual([1, 2, 3]);
   });
 
   it("clearPodcastQueue removes all songs in a single host call", async () => {
@@ -181,4 +288,18 @@ describe("podcastQueue", () => {
     const listed = await listPodcastQueue(api);
     expect(listed.songs).toEqual([]);
   });
+
+  it("never adopts an existing same-named playlist; creates an avoided name instead", async () => {
+    const api = mockApi([{ id: 7, name: "播客", songs: [99] }]);
+    const created = await ensurePodcastPlaylist(api);
+    expect(created.created).toBe(true);
+    expect(created.playlistId).not.toBe(7);
+    expect(created.playlistName).toBe("播客 (插件)");
+    const userList = api.state.find((p) => p.id === 7);
+    expect(userList!.songs).toEqual([99]);
+    const again = await ensurePodcastPlaylist(api);
+    expect(again.created).toBe(false);
+    expect(again.playlistId).toBe(created.playlistId);
+  });
+
 });

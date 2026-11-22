@@ -24,8 +24,8 @@
       <h1>播客</h1>
     </div>
     <div class="toolbar">
-      <button type="button" class="icon-btn" id="btnToggleQueue" title="隐藏播放列表" aria-pressed="true" aria-controls="queuePanel">
-        <span data-icon="panelRightClose" data-size="17"></span>
+      <button type="button" class="icon-btn" id="btnToggleQueue" title="隐藏「播客」列表" aria-label="「播客」列表" aria-pressed="true" aria-controls="queuePanel">
+        <span data-icon="listMusic" data-size="17"></span>
       </button>
     </div>
   </header>
@@ -61,14 +61,10 @@
               <button type="button" class="icon-btn" id="btnRecentRefresh" title="刷新订阅">
                 <span data-icon="rotateCcw" data-size="16"></span>
               </button>
-              <button type="button" class="icon-btn" id="btnToggleQueueInline" title="隐藏播放列表" aria-pressed="true" aria-controls="queuePanel">
-                <span data-icon="listMusic" data-size="16"></span>
-              </button>
             </div>
           </div>
-          <div id="recentList" class="ep-list scroll-body">
-            <div class="empty">加载中…</div>
-          </div>
+          <div class="recent-refresh-hint muted" id="recentRefreshHint" hidden>正在刷新…</div>
+          <div id="recentList" class="ep-list scroll-body" aria-live="polite"></div>
         </div>
       </section>
 
@@ -106,9 +102,7 @@
             <button type="button" class="btn btn--ghost btn--sm" id="btnHistorySelectCancel">取消</button>
             <span id="historySelectCount" class="muted"></span>
           </div>
-          <div id="historyList" class="ep-list scroll-body">
-            <div class="empty">加载中…</div>
-          </div>
+          <div id="historyList" class="ep-list scroll-body" aria-live="polite"></div>
         </div>
       </section>
 
@@ -148,8 +142,8 @@
               </button>
             </div>
             <div class="toolbar">
-              <button type="button" class="icon-btn" id="btnRefreshAll" title="刷新全部">
-                <span data-icon="rotateCcw" data-size="16"></span>
+              <button type="button" class="icon-btn" id="btnSubsSelect" title="多选" aria-pressed="false">
+                <span data-icon="listChecks" data-size="16"></span>
               </button>
               <button type="button" class="icon-btn" id="btnOpmlExport" title="导出 OPML">
                 <span data-icon="download" data-size="16"></span>
@@ -159,6 +153,11 @@
               </button>
             </div>
           </div>
+          <div id="subsSelectBar" class="row row--tight history-select-bar hidden">
+            <button type="button" class="btn btn--danger btn--sm" id="btnSubsDeleteSelected" disabled>删除所选</button>
+            <button type="button" class="btn btn--ghost btn--sm" id="btnSubsSelectCancel">取消</button>
+            <span id="subsSelectCount" class="muted"></span>
+          </div>
           <div id="subList" class="sub-grid scroll-body">
             <div class="empty">加载中…</div>
           </div>
@@ -167,7 +166,7 @@
         <div class="card" id="addSubCard" hidden>
           <div class="card__head">
             <div class="card__head-main"><h2>添加订阅</h2></div>
-            <button type="button" class="icon-btn" id="btnCloseAddSub" title="收起">
+            <button type="button" class="icon-btn" id="btnCloseAddSub" title="取消" aria-label="取消">
               <span data-icon="x" data-size="16"></span>
             </button>
           </div>
@@ -175,6 +174,7 @@
           <input id="feedUrl" type="url" placeholder="https://example.com/podcast.xml" />
           <div class="row">
             <button type="button" class="btn btn--primary" id="btnAdd">添加并拉取</button>
+            <button type="button" class="btn btn--ghost" id="btnCancelAddSub">取消</button>
           </div>
 
           <details class="disclosure" style="margin-top:12px">
@@ -199,16 +199,6 @@
       <section id="tab-settings" class="hidden">
         <div class="card settings-card">
           <div class="card__head">
-            <div class="card__head-main"><h2>收听记录</h2></div>
-          </div>
-          <p class="muted" id="playEventsNote">
-            进度与收听历史保存在本插件（按节目 feed + 单集 guid），不是宿主播放历史。
-            正在检测是否已订阅宿主播放事件…
-          </p>
-        </div>
-
-        <div class="card settings-card">
-          <div class="card__head">
             <div class="card__head-main"><h2>订阅索引</h2></div>
           </div>
           <p class="muted">
@@ -218,7 +208,7 @@
           <div class="field">
             <label for="maxEpisodes">索引深度（每订阅保留最近集数）</label>
             <input id="maxEpisodes" type="number" min="1" max="200" value="50" />
-            <div class="field-hint muted" id="maxEpisodesHint">可填 1–200，默认 50。</div>
+            <div class="field-hint muted" id="maxEpisodesHint">可填 1–200，默认 50。这是自动刷新时每个订阅保留的最近集数，不是历史索引上限。要听更早的节目，请在该频道页使用「索引历史」（按频道选择，本地安全上限 2000 集，且只能收录该 RSS 当前露出的条目）。</div>
           </div>
           <div class="row">
             <button type="button" class="btn btn--primary" id="btnSaveIndex">保存索引深度</button>
@@ -254,8 +244,7 @@
             </div>
           </div>
           <p class="muted">
-            通过「智能音箱」插件（entryPath <code>miot</code>）把单集推送到小爱音箱：插件读取已登录账号下的设备，
-            再把本机可达的单集播放地址推给它。
+            通过「智能音箱」插件（entryPath <code>miot</code>）让小爱音箱播放「播客」歌单。投放时插件会先把这一集移到「播客」列表第一位，再让音箱从第一位按顺序播放；列表顺序在播放请求之前就已调整，即使请求失败也不会自动恢复。选择设备本身不会发声，只会向这次明确选中的音箱发送播放。
           </p>
           <div id="castDeviceList" class="cast-devices">
             <div class="empty">正在读取音箱…</div>
@@ -280,27 +269,27 @@
       </section>
     </main>
 
-    <aside class="queue-panel" id="queuePanel" aria-label="播放列表">
+    <aside class="queue-panel" id="queuePanel" aria-label="「播客」列表">
       <div class="queue-panel__backdrop" id="queueBackdrop"></div>
       <div class="queue-sheet">
         <div class="queue-sheet__grab" id="queueGrab"></div>
         <div class="card__head">
           <div class="card__head-main" style="flex-direction:column;align-items:flex-start;gap:2px">
-            <h2>播放列表</h2>
+            <h2>「播客」列表</h2>
             <p id="queueMeta" class="sub">固定宿主歌单</p>
           </div>
           <div class="more-wrap" data-more-wrap="queue-panel">
-            <button type="button" class="icon-btn" id="btnQueueMenu" title="播放列表操作">
+            <button type="button" class="icon-btn" id="btnQueueMenu" title="「播客」列表操作">
               <span data-icon="moreHorizontal" data-size="17"></span>
             </button>
             <div class="more-menu more-menu--down">
               <button type="button" data-queue-act="replace"><span data-icon="play" data-size="15"></span><span>从列表开头播放</span></button>
               <button type="button" data-queue-act="select"><span data-icon="listChecks" data-size="15"></span><span>多选</span></button>
-              <button type="button" data-queue-act="cast-all"><span data-icon="speaker" data-size="15"></span><span>整张列表投放到音箱</span></button>
+              <button type="button" data-queue-act="cast-all"><span data-icon="speaker" data-size="15"></span><span>从列表开头投放到音箱</span></button>
               <button type="button" data-queue-act="refresh"><span data-icon="rotateCcw" data-size="15"></span><span>刷新</span></button>
               <div class="sep"></div>
               <button type="button" data-queue-act="remove-played"><span data-icon="checkCircle" data-size="15"></span><span>移除已播放</span></button>
-              <button type="button" class="danger-text" data-queue-act="clear"><span data-icon="trash" data-size="15"></span><span>清空播放列表</span></button>
+              <button type="button" class="danger-text" data-queue-act="clear"><span data-icon="trash" data-size="15"></span><span>清空「播客」列表</span></button>
             </div>
           </div>
         </div>
@@ -317,38 +306,6 @@
         </div>
       </div>
     </aside>
-  </div>
-
-  <div class="player is-empty" id="playerBar" aria-label="播放器" role="region">
-    <div class="player__line"><i id="playerLine"></i></div>
-    <div class="player__cover placeholder" id="playerCover">封面</div>
-    <div class="player__main">
-      <button type="button" class="player__meta" id="playerMeta" title="展开播放控制">
-        <div class="player__title" id="playerTitle">尚未播放</div>
-        <div class="player__sub" id="playerSub"></div>
-      </button>
-      <div class="player__seek">
-        <div class="player__times">
-          <span id="playerPos">0:00</span>
-          <span id="playerDur">0:00</span>
-        </div>
-        <input class="player__range" id="playerSeek" type="range" min="0" max="1000" value="0" step="1" disabled />
-      </div>
-    </div>
-    <div class="player__controls">
-      <button type="button" class="icon-btn" id="btnSeekBack" title="后退 15 秒">
-        <span data-icon="rewind" data-size="18"></span>
-      </button>
-      <button type="button" class="icon-btn icon-btn--primary" id="btnPlayPause" title="播放/暂停">
-        <span data-icon="play" data-size="20"></span>
-      </button>
-      <button type="button" class="icon-btn" id="btnSeekFwd" title="前进 15 秒">
-        <span data-icon="forward" data-size="18"></span>
-      </button>
-      <button type="button" class="icon-btn" id="btnPlayerCast" title="投放到小爱音箱">
-        <span data-icon="speaker" data-size="18"></span>
-      </button>
-    </div>
   </div>
 
   <button type="button" class="fab" id="btnBackToTop" aria-label="返回顶部" title="返回顶部">

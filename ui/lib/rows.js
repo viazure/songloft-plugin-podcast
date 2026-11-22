@@ -51,7 +51,7 @@ export function coverHtml(url, title, cls) {
   const klass = cls || "ep-cover";
   const abs = absoluteCoverUrl(url);
   if (abs) {
-    return `<img class="${klass}" src="${escapeHtml(abs)}" alt="" loading="lazy" data-cover />`;
+    return `<img class="${klass}" src="${escapeHtml(abs)}" alt="" loading="lazy" referrerpolicy="no-referrer" data-cover />`;
   }
   const letter = String(title || "?").trim().charAt(0).toUpperCase() || "?";
   return (
@@ -119,6 +119,7 @@ export function episodeRowHtml(ep, idx, opts = {}) {
 
   const lead = opts.leadHtml || "";
   const pending = !!opts.pending;
+  const fromWaitlist = !!opts.fromWaitlist;
   const headGrid = lead ? "ep-head q-head" : "ep-head";
 
   // Channel affordance: both the artwork and the show name open the channel.
@@ -145,7 +146,7 @@ export function episodeRowHtml(ep, idx, opts = {}) {
 
   return (
     `<div class="ep-row${isCurrent ? " is-current" : ""}${pending ? " is-pending" : ""}${opts.extraClass ? " " + opts.extraClass : ""}" ` +
-    `data-row data-idx="${idx}" ${pending ? 'aria-busy="true" ' : ""}${rowDataset(ep)}>` +
+    `data-row data-idx="${idx}" ${pending ? 'aria-busy="true" ' : ""}${fromWaitlist ? 'data-from-waitlist="1" ' : ""}${rowDataset(ep)}>` +
     `<div class="${headGrid}">` +
     lead +
     cover +
@@ -163,7 +164,7 @@ export function episodeRowHtml(ep, idx, opts = {}) {
     `</div>` +
     `</div>` +
     `<div class="actions-row">` +
-    `<button type="button" class="icon-btn icon-btn--play" data-play-btn data-idx="${idx}" title="${playButtonLabel({ isCurrent, phase: snap.phase, pending })}" aria-label="${playButtonLabel({ isCurrent, phase: snap.phase, pending })}"${pending ? " disabled" : ""}>` +
+    `<button type="button" class="icon-btn icon-btn--play" data-play-btn data-idx="${idx}" title="${playButtonLabel({ isCurrent, phase: snap.phase, pending, fromWaitlist })}" aria-label="${playButtonLabel({ isCurrent, phase: snap.phase, pending, fromWaitlist })}"${pending ? " disabled" : ""}>` +
     `${pending ? '<span class="q-spinner" aria-hidden="true"></span>' : icon(playIcon, 17)}</button>` +
     actions +
     (opts.moreHtml || "") +
@@ -236,7 +237,8 @@ export function paintRows(snap) {
     if (playBtn) {
       const iconName = isCurrent && current.phase === "playing" ? "pause" : "play";
       const pending = row.classList.contains("is-pending");
-      const label = playButtonLabel({ isCurrent, phase: current.phase, pending });
+      const fromWaitlist = row.hasAttribute("data-from-waitlist");
+      const label = playButtonLabel({ isCurrent, phase: current.phase, pending, fromWaitlist });
       if (!pending) playBtn.innerHTML = icon(iconName, 17);
       playBtn.title = label;
       playBtn.setAttribute("aria-label", label);

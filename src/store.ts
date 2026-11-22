@@ -2,19 +2,24 @@ import type { RefreshScheduleState } from "./schedule";
 import { DEFAULT_REFRESH_SCHEDULE, normalizeIntervalHours } from "./schedule";
 import { feedIdFromUrl, normalizeFeedUrl } from "./hash";
 import { usableCoverUrl } from "./coverUrl";
+import { applyHistorySafetyCap, episodeKey } from "./historyCap";
 
 /**
- * Hard cap on how many episodes we keep per subscription, in *every* path:
- * the settings input, settings validation, `refresh` slicing and the storage
- * normaliser all read this one constant. Raising it here is the only place to
- * change the ceiling.
+ * Automatic refresh window: settings only adjust this, never the history cap.
+ * Default stays below the auto-window ceiling.
  */
-export const MAX_EPISODE_INDEX = 200;
-
-/** Default index depth. Deliberately lower than the cap. */
 export const DEFAULT_MAX_EPISODES = 50;
 
-/** Coerce any user/legacy value into the valid 1..MAX_EPISODE_INDEX range. */
+/** Ceiling for the automatic newest-window (settings slider / clamp). */
+export const MAX_AUTO_WINDOW = 200;
+
+/**
+ * Safety ceiling for an explicit per-channel history index.
+ * Not a settings item; the slider must not follow this value.
+ */
+export const MAX_HISTORY_INDEX = 2000;
+
+/** Coerce any user/legacy value into the valid 1..MAX_AUTO_WINDOW range. */
 export function clampMaxEpisodes(value: unknown, fallback = DEFAULT_MAX_EPISODES): number {
   // `null` / `""` mean "unset", not "zero" — fall back to the default instead of
   // collapsing to 1.
@@ -24,7 +29,7 @@ export function clampMaxEpisodes(value: unknown, fallback = DEFAULT_MAX_EPISODES
   if (!Number.isFinite(n)) return fallback;
   const rounded = Math.round(n);
   if (rounded < 1) return 1;
-  if (rounded > MAX_EPISODE_INDEX) return MAX_EPISODE_INDEX;
+  if (rounded > MAX_AUTO_WINDOW) return MAX_AUTO_WINDOW;
   return rounded;
 }
 
@@ -71,6 +76,8 @@ export interface Subscription {
   url: string;
   title: string;
   author: string | null;
+  /** Channel / show description from the feed (plain or light markup). */
+  description: string | null;
   coverUrl: string | null;
   createdAt: number;
   updatedAt: number;
@@ -79,8 +86,42 @@ export interface Subscription {
   lastSkippedNonAudio: number;
   episodeCount: number;
   truncated: boolean;
-  /** Recent episode index (capped). */
+  /** User asked this channel to keep a deeper history index. */
+  historyIndexed: boolean;
+  historyIndexStatus: "idle" | "running" | "success" | "error";
+  historyIndexError: string | null;
+  historyIndexAt: number | null;
+  /** Audio items last seen in the feed itself (may exceed what we store). */
+  feedEpisodeCount: number;
+  /** True when a deep index hit MAX_HISTORY_INDEX and dropped the middle. */
+  historyIndexCapped: boolean;
+  /** Dedup key of the earliest episode pinned on first successful deep index. */
+  historyEarliestDedupKey: string | null;
+  historyEarliestConfirmed: boolean;
+  /** Episode index (window channels <= MAX_AUTO_WINDOW; deep index <= MAX_HISTORY_INDEX). */
   episodes: EpisodeSummary[];
+}
+
+export function defaultHistoryIndexFields(): {
+  historyIndexed: boolean;
+  historyIndexStatus: "idle" | "running" | "success" | "error";
+  historyIndexError: string | null;
+  historyIndexAt: number | null;
+  feedEpisodeCount: number;
+  historyIndexCapped: boolean;
+  historyEarliestDedupKey: string | null;
+  historyEarliestConfirmed: boolean;
+} {
+  return {
+    historyIndexed: false,
+    historyIndexStatus: "idle",
+    historyIndexError: null,
+    historyIndexAt: null,
+    feedEpisodeCount: 0,
+    historyIndexCapped: false,
+    historyEarliestDedupKey: null,
+    historyEarliestConfirmed: false,
+  };
 }
 
 export interface PluginSettings {
@@ -723,14 +764,46 @@ function normalizeSub(raw: unknown): Subscription | null {
   const url = typeof o.url === "string" ? o.url : "";
   if (!url) return null;
   const id = typeof o.id === "string" && o.id.trim() ? o.id.trim() : feedIdFromUrl(url);
-  const episodes = Array.isArray(o.episodes)
-    ? (o.episodes.map(normalizeEpisode).filter(Boolean) as EpisodeSummary[]).slice(0, MAX_EPISODE_INDEX)
+  const historyIndexed = o.historyIndexed === true;
+  const rawEpisodes = Array.isArray(o.episodes)
+    ? (o.episodes.map(normalizeEpisode).filter(Boolean) as EpisodeSummary[])
     : [];
+  const pinKey =
+    typeof o.historyEarliestDedupKey === "string" && o.historyEarliestDedupKey
+      ? o.historyEarliestDedupKey
+      : null;
+  const pinConfirmed = o.historyEarliestConfirmed === true;
+  let historyIndexCapped = o.historyIndexCapped === true;
+  let historyEarliestDedupKey = pinKey;
+  let historyEarliestConfirmed = pinConfirmed;
+  let episodes: EpisodeSummary[];
+  if (historyIndexed) {
+    const capped = applyHistorySafetyCap(rawEpisodes, MAX_HISTORY_INDEX, {
+      key: pinKey,
+      confirmed: pinConfirmed,
+    });
+    episodes = capped.episodes;
+    if (capped.capped) historyIndexCapped = true;
+    if (capped.earliest) {
+      historyEarliestDedupKey = episodeKey(capped.earliest);
+      historyEarliestConfirmed = capped.earliestKept;
+    } else if (capped.capped) {
+      historyEarliestConfirmed = false;
+    }
+  } else {
+    episodes = rawEpisodes.slice(0, MAX_AUTO_WINDOW);
+  }
   return {
     id,
     url,
     title: typeof o.title === "string" && o.title.trim() ? o.title.trim() : url,
     author: typeof o.author === "string" ? o.author : null,
+    description: (() => {
+      if (typeof o.description !== "string") return null;
+      const d = o.description.trim();
+      if (!d) return null;
+      return d.length > 4000 ? d.slice(0, 4000) + "…" : d;
+    })(),
     coverUrl: typeof o.coverUrl === "string" ? o.coverUrl : null,
     createdAt: numOr(o.createdAt, Date.now()),
     updatedAt: numOr(o.updatedAt, Date.now()),
@@ -740,8 +813,27 @@ function normalizeSub(raw: unknown): Subscription | null {
         : null,
     lastError: typeof o.lastError === "string" && o.lastError ? sanitizeReason(o.lastError) : null,
     lastSkippedNonAudio: numOr(o.lastSkippedNonAudio, 0),
-    episodeCount: numOr(o.episodeCount, episodes.length),
-    truncated: o.truncated === true,
+    episodeCount: episodes.length,
+    truncated: o.truncated === true || (historyIndexed && historyIndexCapped),
+    historyIndexed,
+    historyIndexStatus:
+      o.historyIndexStatus === "running" ||
+      o.historyIndexStatus === "success" ||
+      o.historyIndexStatus === "error"
+        ? o.historyIndexStatus
+        : "idle",
+    historyIndexError:
+      typeof o.historyIndexError === "string" && o.historyIndexError
+        ? sanitizeReason(o.historyIndexError)
+        : null,
+    historyIndexAt:
+      typeof o.historyIndexAt === "number" && Number.isFinite(o.historyIndexAt)
+        ? o.historyIndexAt
+        : null,
+    feedEpisodeCount: numOr(o.feedEpisodeCount, episodes.length),
+    historyIndexCapped,
+    historyEarliestDedupKey,
+    historyEarliestConfirmed,
     episodes,
   };
 }
@@ -786,6 +878,24 @@ export async function removeSubscription(id: string): Promise<{
   list.splice(i, 1);
   await saveSubscriptions(list);
   return { removed, list };
+}
+
+export async function removeSubscriptions(ids: string[]): Promise<{
+  removed: Subscription[];
+  list: Subscription[];
+}> {
+  const idSet = new Set((ids || []).map((x) => String(x || "").trim()).filter(Boolean));
+  const list = await loadSubscriptions();
+  if (!idSet.size) return { removed: [], list };
+  const removed: Subscription[] = [];
+  const next: Subscription[] = [];
+  for (const sub of list) {
+    if (idSet.has(sub.id)) removed.push(sub);
+    else next.push(sub);
+  }
+  if (!removed.length) return { removed: [], list };
+  await saveSubscriptions(next);
+  return { removed, list: next };
 }
 
 export function findByUrl(list: Subscription[], url: string): Subscription | null {
@@ -1140,6 +1250,7 @@ export function publicSubscription(s: Subscription) {
     url: s.url,
     title: s.title,
     author: s.author,
+    description: s.description || null,
     coverUrl: s.coverUrl,
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
@@ -1148,6 +1259,14 @@ export function publicSubscription(s: Subscription) {
     lastSkippedNonAudio: s.lastSkippedNonAudio,
     episodeCount: s.episodeCount,
     truncated: s.truncated,
+    historyIndexed: !!s.historyIndexed,
+    historyIndexStatus: s.historyIndexStatus || "idle",
+    historyIndexError: s.historyIndexError || null,
+    historyIndexAt: s.historyIndexAt || null,
+    feedEpisodeCount: s.feedEpisodeCount || 0,
+    historyIndexCapped: !!s.historyIndexCapped,
+    historyEarliestConfirmed: !!s.historyEarliestConfirmed,
+    historyIndexLimit: MAX_HISTORY_INDEX,
   };
 }
 

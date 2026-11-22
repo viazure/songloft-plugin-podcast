@@ -74,7 +74,7 @@ export function historyCoverHtml(entry, opts = {}) {
     `${escapeHtml(letter)}</div>`;
   if (!candidates.length) return ph;
   return (
-    `<img class="ep-cover" src="${escapeHtml(candidates[0])}" alt="" loading="lazy" ` +
+    `<img class="ep-cover" src="${escapeHtml(candidates[0])}" alt="" loading="lazy" referrerpolicy="no-referrer" ` +
     `data-history-cover="1" ` +
     `data-cover-candidates="${escapeHtml(JSON.stringify(candidates))}" ` +
     `data-cover-letter="${escapeHtml(letter)}" ` +

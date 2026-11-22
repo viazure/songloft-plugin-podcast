@@ -87,6 +87,27 @@ describe("castPlaylistToMiot", () => {
     expect(sent).toMatchObject({ playlist_id: 2915, start_index: 3 });
   });
 
+  it("forwards song id and order mode with the start index", async () => {
+    (globalThis as unknown as { songloft: unknown }).songloft = HOST_PLUGIN;
+    let sent: Record<string, unknown> | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (String(url).endsWith("/mina/devices")) return jsonResponse(ONLINE);
+        sent = JSON.parse(String(init!.body));
+        return jsonResponse({ success: true });
+      })
+    );
+    const { castPlaylistToMiot } = await import("../src/castMiot");
+    await castPlaylistToMiot(2915, { startIndex: 2, songId: 33, playMode: "order" });
+    expect(sent).toMatchObject({
+      playlist_id: 2915,
+      start_index: 2,
+      song_id: 33,
+      play_mode: "order",
+    });
+  });
+
   it("refuses to pretend it played on an offline speaker", async () => {
     (globalThis as unknown as { songloft: unknown }).songloft = HOST_PLUGIN;
     vi.stubGlobal(

@@ -4,18 +4,18 @@ import {
   clampMaxEpisodes,
   DEFAULT_MAX_EPISODES,
   loadSettings,
-  MAX_EPISODE_INDEX,
+  MAX_AUTO_WINDOW,
+  MAX_HISTORY_INDEX,
   saveSettings,
   loadSubscriptions,
 } from "../src/store";
 
 /**
- * Index depth contract:
- *  - one hard cap (`MAX_EPISODE_INDEX`) governs the settings input, settings
- *    storage, refresh slicing and the storage normaliser;
- *  - the default stays lower than the cap;
- *  - exceeding the cap is clamped, never an error;
- *  - 「已截断」 means "feed had more than we keep", not a failure.
+ * Split caps:
+ *  - settings / auto refresh use MAX_AUTO_WINDOW (200);
+ *  - explicit history index uses MAX_HISTORY_INDEX (2000);
+ *  - the default stays lower than the auto window;
+ *  - exceeding the auto window is clamped, never an error.
  */
 
 type Bag = Record<string, unknown>;
@@ -36,14 +36,14 @@ function installStorage(initial: Bag = {}) {
   return bag;
 }
 
-/** Build an RSS doc with `n` audio episodes, newest first. */
 function rssWith(count: number): string {
   const items = Array.from({ length: count }, (_, i) => {
     const seq = count - i;
+    const d = new Date(Date.UTC(2020, 0, 1, 0, 0, seq));
     return `    <item>
       <title>Ep ${seq}</title>
       <guid>g-${seq}</guid>
-      <pubDate>Mon, 0${(i % 9) + 1} Jan 2023 0${i % 9}:00:00 GMT</pubDate>
+      <pubDate>${d.toUTCString()}</pubDate>
       <itunes:duration>600</itunes:duration>
       <enclosure url="https://cdn.example.com/${seq}.mp3" type="audio/mpeg"/>
     </item>`;
@@ -65,9 +65,24 @@ function fetchOf(count: number) {
     new Response(body, { status: 200, headers: { "Content-Type": "application/rss+xml" } });
 }
 
+function episodeRow(i: number) {
+  return {
+    title: `Ep ${i}`,
+    guid: `g-${i}`,
+    guidSource: "rss",
+    pubDate: null,
+    pubDateMs: i * 1000,
+    durationSec: null,
+    coverUrl: null,
+    enclosureUrl: `https://cdn.example.com/${i}.mp3`,
+    dedupKey: `d-${i}`,
+  };
+}
+
 describe("clampMaxEpisodes", () => {
-  it("clamps to the hard cap instead of erroring", () => {
-    expect(clampMaxEpisodes(10000)).toBe(MAX_EPISODE_INDEX);
+  it("clamps to the auto window instead of erroring or following the history cap", () => {
+    expect(clampMaxEpisodes(10000)).toBe(MAX_AUTO_WINDOW);
+    expect(clampMaxEpisodes(MAX_HISTORY_INDEX)).toBe(MAX_AUTO_WINDOW);
     expect(clampMaxEpisodes(-5)).toBe(1);
     expect(clampMaxEpisodes(0)).toBe(1);
   });
@@ -76,7 +91,7 @@ describe("clampMaxEpisodes", () => {
     expect(clampMaxEpisodes(30)).toBe(30);
     expect(clampMaxEpisodes(30.4)).toBe(30);
     expect(clampMaxEpisodes(30.6)).toBe(31);
-    expect(clampMaxEpisodes(MAX_EPISODE_INDEX)).toBe(MAX_EPISODE_INDEX);
+    expect(clampMaxEpisodes(MAX_AUTO_WINDOW)).toBe(MAX_AUTO_WINDOW);
   });
 
   it("falls back for non-numeric input", () => {
@@ -85,28 +100,30 @@ describe("clampMaxEpisodes", () => {
     expect(clampMaxEpisodes(null)).toBe(DEFAULT_MAX_EPISODES);
   });
 
-  it("default stays below the cap", () => {
-    expect(DEFAULT_MAX_EPISODES).toBeLessThan(MAX_EPISODE_INDEX);
+  it("default stays below the auto window, and the history cap stays separate", () => {
+    expect(DEFAULT_MAX_EPISODES).toBeLessThan(MAX_AUTO_WINDOW);
     expect(DEFAULT_MAX_EPISODES).toBe(50);
-    expect(MAX_EPISODE_INDEX).toBe(200);
+    expect(MAX_AUTO_WINDOW).toBe(200);
+    expect(MAX_HISTORY_INDEX).toBe(2000);
+    expect(MAX_AUTO_WINDOW).toBeLessThan(MAX_HISTORY_INDEX);
   });
 });
 
-describe("settings persistence clamps to the cap", () => {
+describe("settings persistence clamps to the auto window", () => {
   beforeEach(() => installStorage());
 
-  it("stores a clamped value when the caller asks for more than the cap", async () => {
+  it("stores a clamped value when the caller asks for more than the auto window", async () => {
     const saved = await saveSettings({ maxEpisodes: 9999 });
-    expect(saved.maxEpisodes).toBe(MAX_EPISODE_INDEX);
+    expect(saved.maxEpisodes).toBe(MAX_AUTO_WINDOW);
 
     const reloaded = await loadSettings();
-    expect(reloaded.maxEpisodes).toBe(MAX_EPISODE_INDEX);
+    expect(reloaded.maxEpisodes).toBe(MAX_AUTO_WINDOW);
   });
 
-  it("clamps legacy rows on read", async () => {
-    installStorage({ settings: { maxEpisodes: 500 }, } as unknown as Bag);
+  it("clamps legacy rows on read, including a 2000-era value", async () => {
+    installStorage({ settings: { maxEpisodes: 2000 } } as unknown as Bag);
     const s = await loadSettings();
-    expect(s.maxEpisodes).toBe(MAX_EPISODE_INDEX);
+    expect(s.maxEpisodes).toBe(MAX_AUTO_WINDOW);
   });
 
   it("keeps a sane default when the field is absent", async () => {
@@ -115,7 +132,7 @@ describe("settings persistence clamps to the cap", () => {
   });
 });
 
-describe("refresh honours the index depth on every path", () => {
+describe("refresh honours the auto window on shallow channels", () => {
   it("truncates to N and flags it when the feed is longer", async () => {
     installStorage();
     await saveSettings({ maxEpisodes: 3 });
@@ -128,6 +145,7 @@ describe("refresh honours the index depth on every path", () => {
     expect(added.subscription.episodes.length).toBe(3);
     expect(added.subscription.episodeCount).toBe(3);
     expect(added.truncated).toBe(true);
+    expect(added.subscription.historyIndexed).toBeFalsy();
 
     const subs = await loadSubscriptions();
     expect(subs[0].episodes.length).toBe(3);
@@ -157,8 +175,6 @@ describe("refresh honours the index depth on every path", () => {
     if (!added.ok) return;
     expect(added.subscription.episodes.length).toBe(8);
 
-    // Lower the depth, refresh again (this is the same code path used by the
-    // settings card, the toolbar refresh and the channel dialog refresh).
     await saveSettings({ maxEpisodes: 2 });
     const again = await refreshSubscription(added.subscription.id, { fetchImpl: fetchOf(10) });
     expect(again.ok).toBe(true);
@@ -167,7 +183,7 @@ describe("refresh honours the index depth on every path", () => {
     expect(again.truncated).toBe(true);
   });
 
-  it("clamps an explicit deps.maxEpisodes above the cap", async () => {
+  it("clamps an explicit deps.maxEpisodes above the auto window", async () => {
     installStorage();
     const added = await addSubscription("https://example.com/deep.xml", {
       fetchImpl: fetchOf(10),
@@ -175,37 +191,27 @@ describe("refresh honours the index depth on every path", () => {
     });
     expect(added.ok).toBe(true);
     if (!added.ok) return;
-    // Feed only has 10, so the cap is not the limiter here — assert the value
-    // was not rejected outright.
     expect(added.subscription.episodes.length).toBe(10);
     expect(added.truncated).toBe(false);
   });
 
-  it("never keeps more than the hard cap even if the feed is huge", async () => {
+  it("never keeps more than the auto window on a shallow add, even if the feed is huge", async () => {
     installStorage();
     await saveSettings({ maxEpisodes: 99999 });
     const added = await addSubscription("https://example.com/huge.xml", {
-      fetchImpl: fetchOf(MAX_EPISODE_INDEX + 40),
+      fetchImpl: fetchOf(MAX_AUTO_WINDOW + 40),
     });
     expect(added.ok).toBe(true);
     if (!added.ok) return;
-    expect(added.subscription.episodes.length).toBe(MAX_EPISODE_INDEX);
+    expect(added.subscription.episodes.length).toBe(MAX_AUTO_WINDOW);
     expect(added.truncated).toBe(true);
+    expect(added.subscription.episodes.some((e) => e.guid === "g-1")).toBe(false);
   });
+});
 
-  it("storage normaliser keeps the same ceiling", async () => {
-    // Simulate a legacy row written when the cap was higher.
-    const many = Array.from({ length: MAX_EPISODE_INDEX + 25 }, (_, i) => ({
-      title: `Ep ${i}`,
-      guid: `g-${i}`,
-      guidSource: "rss",
-      pubDate: null,
-      pubDateMs: null,
-      durationSec: null,
-      coverUrl: null,
-      enclosureUrl: `https://cdn.example.com/${i}.mp3`,
-      dedupKey: `d-${i}`,
-    }));
+describe("storage normaliser uses the split caps", () => {
+  it("trims an unmarked shallow channel to the auto window", async () => {
+    const many = Array.from({ length: MAX_AUTO_WINDOW + 25 }, (_, i) => episodeRow(MAX_AUTO_WINDOW + 25 - i));
     installStorage({
       subscriptions: [
         {
@@ -227,6 +233,76 @@ describe("refresh honours the index depth on every path", () => {
     });
 
     const subs = await loadSubscriptions();
-    expect(subs[0].episodes.length).toBe(MAX_EPISODE_INDEX);
+    expect(subs[0].episodes.length).toBe(MAX_AUTO_WINDOW);
+    expect(subs[0].historyIndexed).toBe(false);
+  });
+
+  it("does not trim a marked deep index back to the auto window", async () => {
+    const many = Array.from({ length: 230 }, (_, i) => episodeRow(230 - i));
+    installStorage({
+      subscriptions: [
+        {
+          id: "deep",
+          url: "https://example.com/deep.xml",
+          title: "Deep",
+          author: null,
+          coverUrl: null,
+          createdAt: 1,
+          updatedAt: 1,
+          lastSuccessAt: null,
+          lastError: null,
+          lastSkippedNonAudio: 0,
+          episodeCount: many.length,
+          truncated: false,
+          historyIndexed: true,
+          historyIndexStatus: "success",
+          historyEarliestDedupKey: "d-1",
+          historyEarliestConfirmed: true,
+          episodes: many,
+        },
+      ],
+    });
+
+    const subs = await loadSubscriptions();
+    expect(subs[0].episodes.length).toBe(230);
+    expect(subs[0].episodes.some((e) => e.guid === "g-1")).toBe(true);
+  });
+
+  it("on a marked deep index over the history cap, keeps the pin and the newest 1999", async () => {
+    const many = Array.from({ length: MAX_HISTORY_INDEX + 25 }, (_, i) =>
+      episodeRow(MAX_HISTORY_INDEX + 25 - i)
+    );
+    installStorage({
+      subscriptions: [
+        {
+          id: "huge",
+          url: "https://example.com/huge.xml",
+          title: "Huge",
+          author: null,
+          coverUrl: null,
+          createdAt: 1,
+          updatedAt: 1,
+          lastSuccessAt: null,
+          lastError: null,
+          lastSkippedNonAudio: 0,
+          episodeCount: many.length,
+          truncated: true,
+          historyIndexed: true,
+          historyIndexStatus: "success",
+          historyEarliestDedupKey: "d-1",
+          historyEarliestConfirmed: true,
+          episodes: many,
+        },
+      ],
+    });
+
+    const subs = await loadSubscriptions();
+    const guids = new Set(subs[0].episodes.map((e) => e.guid));
+    expect(subs[0].episodes.length).toBe(MAX_HISTORY_INDEX);
+    expect(guids.has("g-1")).toBe(true);
+    expect(guids.has(`g-${MAX_HISTORY_INDEX + 25}`)).toBe(true);
+    expect(guids.has("g-2")).toBe(false);
+    expect(subs[0].historyIndexCapped).toBe(true);
+    expect(subs[0].historyEarliestConfirmed).toBe(true);
   });
 });

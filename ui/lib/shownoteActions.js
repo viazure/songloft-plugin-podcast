@@ -14,28 +14,33 @@ export const EPISODE_ACTION_FOOT_PAD_X_PX = 32;
 export const EPISODE_ACTION_WRAP_MAX_WIDTH_PX = 720;
 export const EPISODE_ACTION_ORDER = ["play", "queue", "cast", "favorite"];
 
+export const QUEUE_ADD_LABEL = "加入「播客」列表";
+export const QUEUE_ADD_SHORT_LABEL = "加入列表";
+export const PLAY_THROUGH_HINT = "从这一集开始，顺序播完「播客」列表";
+
 /**
  * @param {{ favorited?: boolean } | null | undefined} ep
  */
-export function shownoteFootActions(ep) {
+export function shownoteFootActions(ep, opts = {}) {
   const favorited = !!(ep && ep.favorited);
+  const playHint = opts.fromWaitlist ? PLAY_THROUGH_HINT : "播放这一集";
   return [
     {
       key: "play",
       label: "播放",
       shortLabel: "播放",
-      ariaLabel: "从这一集开始，按播放列表顺序继续",
-      title: "从这一集开始，按播放列表顺序继续",
+      ariaLabel: playHint,
+      title: playHint,
       kind: "primary",
       iconName: "play",
       close: true,
     },
     {
       key: "queue",
-      label: "加入播放列表",
-      shortLabel: "加入列表",
-      ariaLabel: "加入播放列表",
-      title: "加入播放列表",
+      label: QUEUE_ADD_LABEL,
+      shortLabel: QUEUE_ADD_SHORT_LABEL,
+      ariaLabel: QUEUE_ADD_LABEL,
+      title: QUEUE_ADD_LABEL,
       kind: "tonal",
       iconName: "listPlus",
       close: true,
@@ -87,7 +92,6 @@ export function episodeActionsLayout(viewportCssPx, opts = {}) {
     rows: wrap ? 2 : 1,
     cols,
     gap: EPISODE_ACTION_GAP_PX,
-    cellWidth,
     cellMinHeight: EPISODE_ACTION_MIN_HIT_PX,
     hitAreaOk: cellWidth >= EPISODE_ACTION_MIN_HIT_PX,
   };

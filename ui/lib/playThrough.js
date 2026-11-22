@@ -1,19 +1,29 @@
 /**
- * Pure helpers for "play this episode, then let the host continue through the
- * 「播客」list". Side effects (host calls, toasts, confirms) stay in actions.js.
+ * Pure helpers for playing an episode from the real「播客」queue.
+ *
+ * 「播客」is the playback queue itself, not a listen-later plan: starting an
+ * episode moves it to position 0 and the host then plays the whole list from
+ * the first row. Side effects (host calls, toasts, confirms) stay in actions.js.
  */
 
-export const PLAY_THROUGH_LABEL = "从这一集开始，按播放列表顺序继续";
+export const PLAY_THROUGH_LABEL = "从这一集开始，顺序播完「播客」列表";
+export const PLAY_ONE_LABEL = "播放这一集";
 export const SET_QUEUE_UNAVAILABLE =
   "宿主不支持整表播放。请在 Songloft 客户端内打开本插件，或升级宿主后再试。";
 export const PLAY_FROM_START_TITLE = "从列表开头播放";
 export const PLAY_FROM_START_MESSAGE =
-  "将用「播客」列表替换当前正在播放的内容，并从第一首开始。播完一集后会自动继续下一集。";
+  "会用「播客」列表替换当前正在播放的内容，并从第一首开始。按顺序播到末尾后停止，不循环。";
 export const PLAY_FROM_START_OK = "开始播放";
 export const SINGLE_MODE_TITLE = "改为顺序播放？";
 export const SINGLE_MODE_MESSAGE =
-  "当前是单曲模式，播完这一集后不会自动继续下一集。改为顺序播放后，会按「播客」列表继续。";
+  "当前不是顺序播放。改为顺序播放后，会按「播客」列表播到末尾再停止，不循环。";
 export const SINGLE_MODE_OK = "改为顺序播放";
+
+/**
+ * The move-to-front happens before the play request, so it can stand even when
+ * playback fails. Every user-visible message about playing/casting must say so
+ * instead of implying the order only changes when playback succeeds.
+ */
 
 /** Prefer songId, then the host playlist row's `id`. */
 export function episodeSongId(ep) {
@@ -24,11 +34,11 @@ export function episodeSongId(ep) {
   return Number.isFinite(n) ? n : null;
 }
 
-export function playButtonLabel({ isCurrent, phase, pending } = {}) {
+export function playButtonLabel({ isCurrent, phase, pending, fromWaitlist } = {}) {
   if (pending) return "正在加入…";
   if (isCurrent && phase === "playing") return "暂停";
   if (isCurrent) return "继续";
-  return PLAY_THROUGH_LABEL;
+  return fromWaitlist ? PLAY_THROUGH_LABEL : PLAY_ONE_LABEL;
 }
 
 /** Prepared, non-pending song ids in list order. Does not truncate. */
@@ -43,8 +53,9 @@ export function readyQueueSongIds(songs) {
 }
 
 /**
- * Full ready-id list for setQueue, plus the start index of `targetId`.
- * If the target is not yet in the list, it is appended (not prepended / sliced).
+ * Full ready-id list for setQueue, with the target moved to the front so the
+ * queue starts at index 0. A target that is not in the list is prepended
+ * (never appended, never a truncated suffix).
  */
 export function queueIdsForStart(songs, targetId) {
   const ids = readyQueueSongIds(songs);
@@ -52,12 +63,8 @@ export function queueIdsForStart(songs, targetId) {
   if (tid == null || !Number.isFinite(tid)) {
     return { ids, startIndex: 0 };
   }
-  let startIndex = ids.indexOf(tid);
-  if (startIndex < 0) {
-    ids.push(tid);
-    startIndex = ids.length - 1;
-  }
-  return { ids, startIndex };
+  const rest = ids.filter((id) => id !== tid);
+  return { ids: [tid, ...rest], startIndex: 0 };
 }
 
 export function isSinglePlayMode(mode) {

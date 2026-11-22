@@ -19,14 +19,21 @@ describe("shownoteFootActions", () => {
     const play = actions.find((a) => a.key === "play");
     expect(play?.label).toBe("播放");
     expect(play?.shortLabel).toBe("播放");
-    expect(play?.ariaLabel).toBe("从这一集开始，按播放列表顺序继续");
-    expect(play?.title).toBe("从这一集开始，按播放列表顺序继续");
+    expect(play?.ariaLabel).toBe("播放这一集");
+    expect(play?.title).toBe("播放这一集");
     const add = actions.find((a) => a.key === "queue");
-    expect(add?.label).toBe("加入播放列表");
+    expect(add?.label).toBe("加入「播客」列表");
     expect(add?.shortLabel).toBe("加入列表");
-    expect(add?.ariaLabel).toBe("加入播放列表");
-    expect(add?.title).toBe("加入播放列表");
+    expect(add?.ariaLabel).toBe("加入「播客」列表");
+    expect(add?.title).toBe("加入「播客」列表");
     expect(add?.close).toBe(true);
+  });
+
+  it("uses queue-playback copy when opened from the queue", () => {
+    const play = shownoteFootActions({ favorited: false }, { fromWaitlist: true }).find((a) => a.key === "play");
+    expect(play?.ariaLabel).toBe("从这一集开始，顺序播完「播客」列表");
+    expect(play?.title).toBe("从这一集开始，顺序播完「播客」列表");
+    expect(String(play?.ariaLabel)).not.toContain("待听");
   });
 
   it("uses short visible labels and full aria/title, including favorited 已收藏", () => {

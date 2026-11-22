@@ -1,10 +1,15 @@
 /**
- * Fixed host playlist「播客」= the only podcast play queue / listen-later.
+ * Fixed host playlist「播客」= the one real playback queue.
+ *
+ * The whole ordered playlist *is* what plays: pressing play (or casting to a
+ * speaker) moves the chosen episode to position 0 and then plays from there.
+ * It is not a listen-later plan that gets copied somewhere else.
  * type=normal (remote songs). Not per-subscription playlists.
  */
 
 import {
   DEFAULT_PODCAST_PLAYLIST_NAME,
+  appendLog,
   loadSettings,
   saveSettings,
 } from "./store";
@@ -34,6 +39,28 @@ function playlistRow(p: Playlist): { id: number; name: string } {
   return { id: p.id, name: p.name };
 }
 
+function songIdList(songs: Array<{ id?: number } | null | undefined> | null | undefined): number[] {
+  return (songs || [])
+    .map((s) => Number(s && s.id))
+    .filter((n) => Number.isFinite(n));
+}
+
+/** Host log + plugin log; must never fail the queue mutation. */
+async function logPlayFront(songId: number, moved: boolean, first: number | undefined): Promise<void> {
+  const firstLabel = Number.isFinite(Number(first)) ? String(first) : "none";
+  const line = `play-front songId=${songId} moved=${moved} first=${firstLabel}`;
+  try {
+    console.log(`[podcast] ${line}`);
+  } catch {
+    /* ignore */
+  }
+  try {
+    await appendLog("info", line);
+  } catch {
+    /* logging must not fail the move */
+  }
+}
+
 /**
  * Ensure the fixed podcast playlist exists; persist id/name in settings.
  * If preferred name is taken by another playlist, use "播客 (插件)" then numbered suffixes.
@@ -48,18 +75,10 @@ export async function ensurePodcastPlaylist(api: PlaylistsApi): Promise<QueueHan
     if (hit) {
       return { playlistId: hit.id, playlistName: hit.name, created: false };
     }
+    // Saved id is gone. Never adopt another playlist just because the name matches.
   }
 
   const all = await api.list();
-  const byName = (all || []).find((p) => p && p.name === preferred);
-  if (byName) {
-    await saveSettings({
-      podcastPlaylistId: byName.id,
-      podcastPlaylistName: byName.name,
-    });
-    return { playlistId: byName.id, playlistName: byName.name, created: false };
-  }
-
   const name = allocateUniqueName(
     preferred,
     (all || []).map((p) => p.name)
@@ -67,7 +86,7 @@ export async function ensurePodcastPlaylist(api: PlaylistsApi): Promise<QueueHan
   const created = await api.create({
     name,
     type: "normal",
-    description: "Songloft 播客插件播放列表（待听）",
+    description: "Songloft 播客插件播放队列（「播客」就是实际播放队列）",
   });
   await saveSettings({
     podcastPlaylistId: created.id,
@@ -205,6 +224,65 @@ export async function moveInPodcastQueue(
     songIds: next,
     moved: true,
   };
+}
+
+/**
+ * Move one song to the front of the fixed queue — the state a play/cast needs
+ * before it starts, because「播客」is the real playback queue.
+ *
+ * Already first → no reorder call (avoid churn). In the list → reorder. Not in
+ * the list → add it, then reorder it to index 0. `appendToPodcastQueue` keeps
+ * appending at the end; only play/cast moves a row to the front.
+ */
+export async function moveToFrontInPodcastQueue(
+  api: PlaylistsApi,
+  songId: number
+): Promise<{
+  playlistId: number;
+  playlistName: string;
+  songIds: number[];
+  moved: boolean;
+  added: number;
+}> {
+  const handle = await ensurePodcastPlaylist(api);
+  const id = Number(songId);
+  const listed = await api.getSongs(handle.playlistId);
+  const current = songIdList(listed);
+  const base = {
+    playlistId: handle.playlistId,
+    playlistName: handle.playlistName,
+  };
+
+  if (!Number.isFinite(id) || id <= 0) {
+    await logPlayFront(id, false, current[0]);
+    return { ...base, songIds: current, moved: false, added: 0 };
+  }
+  if (current[0] === id) {
+    await logPlayFront(id, false, current[0]);
+    return { ...base, songIds: current, moved: false, added: 0 };
+  }
+
+  let ids = current;
+  let added = 0;
+  if (!current.includes(id)) {
+    const r = await api.addSongs(handle.playlistId, [id]);
+    added = r && typeof r.added === "number" ? r.added : 0;
+    // Re-read so the order is the host's truth (it may dedupe or append elsewhere).
+    ids = songIdList(await api.getSongs(handle.playlistId));
+    if (!ids.includes(id)) {
+      // Host refused the row: report the unchanged order instead of a fake move.
+      await logPlayFront(id, false, ids[0]);
+      return { ...base, songIds: ids, moved: false, added };
+    }
+  }
+
+  const next = [id, ...ids.filter((x) => x !== id)];
+  await api.reorder(handle.playlistId, next);
+  // Confirm the host write; do not return the intended list if it did not stick.
+  const songIds = songIdList(await api.getSongs(handle.playlistId));
+  const moved = songIds[0] === id;
+  await logPlayFront(id, moved, songIds[0]);
+  return { ...base, songIds, moved, added };
 }
 
 /** Replace full order of the fixed podcast playlist. */

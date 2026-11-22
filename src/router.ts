@@ -3,10 +3,15 @@ import type { HTTPRequest, HTTPResponse } from "@songloft/plugin-sdk";
 import {
   addSubscription,
   deleteSubscription,
-  runManualRefreshAll,
+  deleteSubscriptions,
+  ensureChannelDescription,
+  indexSubscriptionHistory,
   runManualRefreshOne,
+  startManualRefreshAll,
+isRefreshJobBusy,
   updateSubscriptionUrl,
 } from "./refresh";
+import { pageEpisodes, parseStaleHistoryIndex } from "./episodeIndex";
 import { runOpmlImport, runOpmlPreview } from "./opmlImport";
 import {
   appendLog,
@@ -19,7 +24,8 @@ import {
   loadLog,
   loadSettings,
   loadSubscriptions,
-  MAX_EPISODE_INDEX,
+  MAX_AUTO_WINDOW,
+  MAX_HISTORY_INDEX,
   publicEpisode,
   publicSubscription,
   recordHistory,
@@ -44,12 +50,19 @@ import {
   clearPodcastQueue,
   listPodcastQueue,
   moveInPodcastQueue,
+  moveToFrontInPodcastQueue,
   removeFromPodcastQueue,
   reorderPodcastQueue,
 } from "./podcastQueue";
 import { pickPlayedSongIds } from "./queueFilters";
 import { buildOpml, opmlExportFilename } from "./opmlExport";
-import { castPlaylistToMiot, castSongToMiot, isPodcastSong, listMiotDevices } from "./castMiot";
+import { isPodcastSong, listMiotDevices } from "./castMiot";
+import { buildHostCastRuntime } from "./castRuntime";
+import {
+  cleanupConfirmedCastPlaylists,
+  executeCastToSpeaker,
+  listCastCleanupCandidates,
+} from "./castSlots";
 import { normalizeFeedUrl } from "./hash";
 import { musicUrlHandler } from "./musicUrl";
 
@@ -175,6 +188,8 @@ router.get("/api/status", async () => {
     maxEpisodes: settings.maxEpisodes,
     podcastPlaylistId: settings.podcastPlaylistId,
     podcastPlaylistName: settings.podcastPlaylistName,
+    /** True while a scheduled/manual feed refresh holds the exclusive gate. */
+    refreshBusy: isRefreshJobBusy(),
     /** True when onInit successfully subscribed to songloft.events.onPlayEvent. */
     playEventsActive: isPlayEventsSubscribed(),
     playPathNote:
@@ -225,7 +240,7 @@ router.get("/api/settings", async () => {
   return jsonResponse({
     ok: true,
     maxEpisodes: settings.maxEpisodes,
-    maxEpisodesLimit: MAX_EPISODE_INDEX,
+    maxEpisodesLimit: MAX_AUTO_WINDOW,
     podcastPlaylistId: settings.podcastPlaylistId,
     podcastPlaylistName: settings.podcastPlaylistName,
     castAction: settings.castAction,
@@ -271,7 +286,7 @@ router.post("/api/settings", async (req) => {
   return jsonResponse({
     ok: true,
     maxEpisodes: settings.maxEpisodes,
-    maxEpisodesLimit: MAX_EPISODE_INDEX,
+    maxEpisodesLimit: MAX_AUTO_WINDOW,
     podcastPlaylistId: settings.podcastPlaylistId,
     podcastPlaylistName: settings.podcastPlaylistName,
     castAction: settings.castAction,
@@ -323,14 +338,18 @@ router.get("/api/subscriptions/:id", async (_req, params) => {
   return jsonResponse({ ok: true, subscription: publicSubscription(sub) });
 });
 
-router.get("/api/subscriptions/:id/episodes", async (_req, params) => {
+router.get("/api/subscriptions/:id/episodes", async (req, params) => {
   const id = params.id || "";
-  const sub = await getSubscription(id);
+  let sub = await getSubscription(id);
   if (!sub) return jsonResponse({ ok: false, error: "订阅不存在" }, 404);
+  if (!(typeof sub.description === "string" && sub.description.trim())) {
+    const enriched = await ensureChannelDescription(id);
+    if (enriched) sub = enriched;
+  }
   const progressList = await loadAllProgress();
   const favorites = await loadFavorites();
   const favKeys = new Set(favorites.map((f) => favoriteKey(f.feedUrl, f.guid)));
-  const episodes = sub.episodes.map((ep) => {
+  const all = sub.episodes.map((ep) => {
     const identity = episodeIdentityKey(sub.url, ep.guid, ep.enclosureUrl);
     const prog = findProgress(progressList, sub.url, identity.guid);
     return {
@@ -340,11 +359,37 @@ router.get("/api/subscriptions/:id/episodes", async (_req, params) => {
       ...publicEpisode(sub.url, ep, prog),
     };
   });
+  const rawQuery = String((req && req.query) || "");
+  const query = new URLSearchParams(rawQuery.startsWith("?") ? rawQuery.slice(1) : rawQuery);
+  const offset = Number(query.get("offset") || 0);
+  const hasLimit = query.has("limit") && query.get("limit") !== "";
+  const paged = pageEpisodes(all, offset, hasLimit ? Number(query.get("limit")) : undefined);
+  const stale = parseStaleHistoryIndex(sub.historyIndexStatus, sub.historyIndexAt);
   return jsonResponse({
     ok: true,
     id: sub.id,
     title: sub.title,
-    episodes,
+    author: sub.author,
+    description: sub.description || null,
+    url: sub.url,
+    lastSuccessAt: sub.lastSuccessAt,
+    coverUrl: sub.coverUrl,
+    truncated: sub.truncated,
+    historyIndexed: !!sub.historyIndexed,
+    historyIndexStatus: stale.status,
+    historyIndexError: stale.status === "error" && stale.error ? stale.error : sub.historyIndexError,
+    historyIndexAt: sub.historyIndexAt,
+    feedEpisodeCount: sub.feedEpisodeCount || 0,
+    capped: !!sub.historyIndexCapped,
+    earliestConfirmed: !!sub.historyEarliestConfirmed,
+    historyIndexLimit: MAX_HISTORY_INDEX,
+    cap: MAX_HISTORY_INDEX,
+    total: paged.total,
+    offset: paged.offset,
+    limit: paged.limit,
+    hasMore: paged.hasMore,
+    nextOffset: paged.nextOffset,
+    episodes: paged.items,
   });
 });
 
@@ -387,6 +432,60 @@ router.delete("/api/subscriptions/:id", async (_req, params) => {
   });
 });
 
+
+router.post("/api/subscriptions/batch-delete", async (req) => {
+  const body = readJson(req);
+  const raw = Array.isArray(body.ids) ? body.ids : [];
+  const ids = raw.map((x) => String(x ?? "").trim()).filter(Boolean);
+  if (!ids.length) return jsonResponse({ ok: false, error: "需要 ids" }, 400);
+  const result = await deleteSubscriptions(ids);
+  if (result.skipped) {
+    return jsonResponse({ ok: false, skipped: true, error: "skipped_busy" }, 409);
+  }
+  if (!result.ok) {
+    return jsonResponse({ ok: false, error: result.reason || "删除失败" }, 404);
+  }
+  return jsonResponse({
+    ok: true,
+    removedCount: result.removedCount || (result.removed ? result.removed.length : 0),
+    removed: (result.removed || []).map(publicSubscription),
+    tip: result.tip,
+  });
+});
+router.post("/api/subscriptions/:id/index-history", async (_req, params) => {
+  const id = params.id || "";
+  const result = await indexSubscriptionHistory(id, {});
+  if (!result.ok) {
+    return jsonResponse(
+      {
+        ok: false,
+        error: result.reason,
+        alreadyRunning: !!result.alreadyRunning,
+        subscription: result.subscription ? publicSubscription(result.subscription) : undefined,
+        indexedCount: result.subscription ? result.subscription.episodeCount : 0,
+        feedAvailableCount: result.subscription ? result.subscription.feedEpisodeCount : 0,
+        historyIndexStatus: result.subscription ? result.subscription.historyIndexStatus : "error",
+        historyIndexError: result.reason,
+      },
+      result.alreadyRunning ? 409 : result.reason === "订阅不存在" ? 404 : 400
+    );
+  }
+  return jsonResponse({
+    ok: true,
+    subscription: publicSubscription(result.subscription),
+    indexedCount: result.indexedCount,
+    feedAvailableCount: result.feedAvailableCount,
+    truncated: result.truncated,
+    capped: result.capped,
+    sourceLimited: result.sourceLimited,
+    skippedNonAudio: result.skippedNonAudio,
+    historyIndexStatus: result.subscription.historyIndexStatus,
+    earliestConfirmed: result.earliestConfirmed,
+    cap: result.cap,
+    historyIndexLimit: result.cap,
+  });
+});
+
 router.post("/api/subscriptions/:id/refresh", async (_req, params) => {
   const id = params.id || "";
   const run = await runManualRefreshOne(id);
@@ -413,13 +512,14 @@ router.post("/api/subscriptions/:id/refresh", async (_req, params) => {
 });
 
 router.post("/api/refresh", async () => {
-  const run = await runManualRefreshAll();
-  if (run.skipped) {
-    return jsonResponse({ ok: false, skipped: true, error: "skipped_busy" }, 409);
-  }
+  // Return immediately so history/queue GETs are not stuck behind a long RSS pass
+  // when the host serializes plugin HTTP. Clients poll refreshBusy on /api/status.
+  // Duplicate accepts join the in-flight full job (joined) instead of 409.
+  const run = startManualRefreshAll();
   return jsonResponse({
-    ok: run.ok,
-    results: run.results,
+    ok: true,
+    started: true,
+    joined: !!run.joined,
   });
 });
 
@@ -699,6 +799,34 @@ router.post("/api/queue/move", async (req) => {
     });
   } catch (e) {
     return jsonResponse({ ok: false, error: String(e ?? "重排失败") }, 500);
+  }
+});
+
+/**
+ * Prepare「播客」for a play: move the episode to row 0.
+ *
+ * The playlist *is* the playback queue, so the order change happens before the
+ * host `setQueue` call. This route only reorders — the client still calls
+ * `setQueue` itself (no single-call fallback when that is unavailable).
+ */
+router.post("/api/queue/play-front", async (req) => {
+  const body = readJson(req);
+  const songId = Number(body.songId);
+  if (!Number.isFinite(songId) || songId <= 0) {
+    return jsonResponse({ ok: false, error: "需要 songId" }, 400);
+  }
+  try {
+    const q = await moveToFrontInPodcastQueue(songloft.playlists, songId);
+    return jsonResponse({
+      ok: true,
+      playlistId: q.playlistId,
+      playlistName: q.playlistName,
+      songIds: q.songIds,
+      moved: q.moved,
+      added: q.added,
+    });
+  } catch (e) {
+    return jsonResponse({ ok: false, error: String(e ?? "调整列表顺序失败") }, 500);
   }
 });
 
@@ -1045,10 +1173,11 @@ router.get("/api/opml/export", async () => {
 });
 
 /**
- * Hand one song to the MIoT speaker plugin (single-stream push).
+ * Hand one episode to the MIoT speaker.
  *
  * Only songs created by this plugin are accepted so the button can never push an
- * unrelated library track to a speaker.
+ * unrelated library track to a speaker. The episode is moved to the front of the
+ * persistent「播客」playlist and that same playlist is played on the speaker.
  */
 router.post("/api/cast/miot", async (req) => {
   const body = readJson(req);
@@ -1077,7 +1206,14 @@ router.post("/api/cast/miot", async (req) => {
     );
   }
 
-  const result = await castSongToMiot(songId, { deviceId: body.deviceId });
+  const result = await executeCastToSpeaker(buildHostCastRuntime(), {
+    songIds: [songId],
+    kind: "one",
+    deviceId: typeof body.deviceId === "string" ? body.deviceId : undefined,
+    startIndex: 0,
+    songId,
+    playMode: "order",
+  });
   if (!result.ok) {
     const soft =
       result.reason === "miot_unavailable" ||
@@ -1088,6 +1224,11 @@ router.post("/api/cast/miot", async (req) => {
         ok: false,
         reason: result.reason,
         error: result.error,
+        warning: result.warning,
+        playIssued: result.playIssued,
+        uncertain: result.uncertain,
+        playlistId: result.playlistId,
+        playlistName: result.playlistName,
         deviceId: result.deviceId,
         deviceName: result.deviceName,
         online: result.online,
@@ -1095,32 +1236,47 @@ router.post("/api/cast/miot", async (req) => {
       soft ? 424 : 502
     );
   }
-  await appendLog("info", `cast to miot ok songId=${songId} device=${result.deviceId}`);
+  await appendLog(
+    "info",
+    `cast to miot ok songId=${songId} playlist=${result.playlistId} device=${result.deviceId} generation=${result.generation}`
+  );
   return jsonResponse({
     ok: true,
     songId,
     title: song.title || "",
+    playlistId: result.playlistId,
+    playlistName: result.playlistName,
     deviceId: result.deviceId,
     deviceName: result.deviceName,
+    warning: result.warning,
   });
 });
 
 /**
- * Push the whole「播客」playlist to the speaker.
- *
- * MIoT owns its own queue, so this hands it a playlist id instead of one stream —
- * that is what makes next/previous and auto-advance work on the device.
+ * Play the persistent「播客」queue on the speaker, starting at the moved-to-front
+ * episode. Never creates or refills a separate cast table.
  */
 router.post("/api/cast/miot-playlist", async (req) => {
   const body = readJson(req);
   try {
     const q = await listPodcastQueue(songloft.playlists);
-    if (!q.songs.length) {
-      return jsonResponse({ ok: false, reason: "cast_failed", error: "播放列表为空" }, 400);
+    const queueIds = (q.songs || [])
+      .map((s) => Number(s && s.id))
+      .filter((id) => Number.isFinite(id) && id > 0);
+    const requested = Array.isArray(body.songIds)
+      ? body.songIds.map((id: unknown) => Number(id)).filter((id: number) => Number.isFinite(id) && id > 0)
+      : queueIds;
+    if (!requested.length) {
+      return jsonResponse({ ok: false, reason: "cast_failed", error: "「播客」列表为空" }, 400);
     }
-    const result = await castPlaylistToMiot(q.playlistId, {
+    const songId = Number(body.songId);
+    const result = await executeCastToSpeaker(buildHostCastRuntime(), {
+      songIds: requested,
+      kind: "list",
       deviceId: typeof body.deviceId === "string" ? body.deviceId : undefined,
-      startIndex: Number(body.startIndex) || 0,
+      startIndex: 0,
+      songId: Number.isFinite(songId) && songId > 0 ? songId : undefined,
+      playMode: "order",
     });
     if (!result.ok) {
       const soft =
@@ -1132,6 +1288,11 @@ router.post("/api/cast/miot-playlist", async (req) => {
           ok: false,
           reason: result.reason,
           error: result.error,
+          warning: result.warning,
+          playIssued: result.playIssued,
+          uncertain: result.uncertain,
+          playlistId: result.playlistId,
+          playlistName: result.playlistName,
           deviceId: result.deviceId,
           deviceName: result.deviceName,
           online: result.online,
@@ -1141,15 +1302,16 @@ router.post("/api/cast/miot-playlist", async (req) => {
     }
     await appendLog(
       "info",
-      `cast playlist to miot ok playlistId=${q.playlistId} device=${result.deviceId}`
+      `cast playlist to miot ok playlist=${result.playlistId} count=${result.count} device=${result.deviceId} generation=${result.generation}`
     );
     return jsonResponse({
       ok: true,
-      playlistId: q.playlistId,
-      playlistName: q.playlistName,
-      count: q.songs.length,
+      playlistId: result.playlistId,
+      playlistName: result.playlistName,
+      count: result.count,
       deviceId: result.deviceId,
       deviceName: result.deviceName,
+      warning: result.warning,
     });
   } catch (e) {
     return jsonResponse({ ok: false, reason: "cast_failed", error: String(e ?? "投放失败") }, 500);
@@ -1165,6 +1327,40 @@ router.get("/api/cast/status", async () => {
     deviceCount: devices.length,
     devices,
   });
+});
+
+/** List leftover and historical prefix-named cast tables for manual cleanup. */
+router.get("/api/cast/snapshots", async () => {
+  try {
+    const listed = await listCastCleanupCandidates(buildHostCastRuntime());
+    return jsonResponse({ ok: true, ...listed });
+  } catch (e) {
+    return jsonResponse({ ok: false, error: String(e ?? "读取投放表失败") }, 500);
+  }
+});
+
+/**
+ * User-initiated cleanup. Requires confirmed=true and explicit playlist ids.
+ * Never deletes the waitlist. Visible speaker references are skipped.
+ */
+router.post("/api/cast/snapshots/cleanup", async (req) => {
+  const body = readJson(req);
+  const playlistIds = Array.isArray(body.playlistIds)
+    ? body.playlistIds.map((id: unknown) => Number(id)).filter((id: number) => Number.isFinite(id) && id > 0)
+    : [];
+  if (!playlistIds.length) {
+    return jsonResponse({ ok: false, error: "请选择要清理的投放表" }, 400);
+  }
+  try {
+    const result = await cleanupConfirmedCastPlaylists(
+      buildHostCastRuntime(),
+      playlistIds,
+      body.confirmed === true
+    );
+    return jsonResponse(result, result.ok ? 200 : 400);
+  } catch (e) {
+    return jsonResponse({ ok: false, error: String(e ?? "清理失败") }, 500);
+  }
 });
 
 export async function handleHTTP(req: HTTPRequest): Promise<HTTPResponse> {

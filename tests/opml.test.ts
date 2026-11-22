@@ -258,30 +258,75 @@ describe("preview + import (stubs only, no network)", () => {
     expect(preview.summary.duplicate).toBeGreaterThanOrEqual(2);
   });
 
-  it("busy refresh mutex yields skipped_busy on import", async () => {
+  it("OPML import waits for in-flight refresh instead of skipped_busy", async () => {
     installSongloftMock();
-    const { refreshScheduler } = await import("../src/schedule");
+    const { upsertSubscription, defaultHistoryIndexFields } = await import("../src/store");
+    const {
+      refreshAll,
+      __resetHistoryIndexLocksForTests,
+      isRefreshJobBusy,
+    } = await import("../src/refresh");
     const { runOpmlImport } = await import("../src/opmlImport");
+    const { feedIdFromUrl } = await import("../src/hash");
+
+    __resetHistoryIndexLocksForTests();
+    const id = feedIdFromUrl("https://example.com/hold.xml");
+    await upsertSubscription({
+      id,
+      url: "https://example.com/hold.xml",
+      title: "Hold",
+      author: null,
+      coverUrl: null,
+      createdAt: 1,
+      updatedAt: 1,
+      lastSuccessAt: null,
+      lastError: null,
+      lastSkippedNonAudio: 0,
+      episodeCount: 0,
+      truncated: false,
+      ...defaultHistoryIndexFields(),
+      episodes: [],
+    });
 
     let release!: () => void;
     const hold = new Promise<void>((r) => {
       release = r;
     });
-    const gate = refreshScheduler.runExclusive(async () => {
-      await hold;
-      return "held";
+    const SAMPLE = `<?xml version="1.0"?><rss version="2.0"><channel><title>Hold</title>
+      <item><title>E</title><guid>g1</guid>
+      <enclosure url="https://cdn.example.com/e.mp3" type="audio/mpeg"/></item>
+    </channel></rss>`;
+
+    const refreshP = refreshAll({
+      fetchImpl: async () => {
+        await hold;
+        return new Response(SAMPLE, {
+          status: 200,
+          headers: { "Content-Type": "application/rss+xml" },
+        });
+      },
     });
-    try {
-      const mini = `<?xml version="1.0"?><opml version="2.0"><head><title>t</title></head><body>
-        <outline text="A" type="rss" xmlUrl="https://example.com/a.xml"/>
-      </body></opml>`;
-      const r = await runOpmlImport(mini);
-      expect(r.ok).toBe(false);
-      expect(r.skipped).toBe(true);
-      expect(r.reason).toBe("skipped_busy");
-    } finally {
-      release();
-      await gate;
+
+    for (let i = 0; i < 50 && !isRefreshJobBusy(); i += 1) {
+      await new Promise((r) => setTimeout(r, 5));
     }
+    expect(isRefreshJobBusy()).toBe(true);
+
+    const mini = `<?xml version="1.0"?><opml version="2.0"><head><title>t</title></head><body>
+      <outline text="A" type="rss" xmlUrl="https://example.com/a.xml"/>
+    </body></opml>`;
+    const importP = runOpmlImport(mini);
+
+    // Still busy: import must be waiting, not skipped.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(isRefreshJobBusy()).toBe(true);
+
+    release();
+    const [refreshR, importR] = await Promise.all([refreshP, importP]);
+    expect(refreshR.ok).toBe(true);
+    expect(importR.ok).toBe(true);
+    expect(importR.skipped).toBeFalsy();
+    expect(importR.added).toBe(1);
+    __resetHistoryIndexLocksForTests();
   });
 });

@@ -5,7 +5,7 @@
 
 import { feedIdFromUrl, normalizeFeedUrl } from "./hash";
 import { parseOpml, previewOpmlAgainstExisting, type OpmlPreviewResult } from "./opml";
-import { refreshScheduler } from "./schedule";
+import { runStoreMutation } from "./refresh";
 import {
   appendLog,
   findByUrl,
@@ -120,6 +120,7 @@ async function importOpmlUnlocked(opmlText: string, nowMs: number): Promise<Opml
         url,
         title,
         author: null,
+        description: null,
         coverUrl: null,
         createdAt: nowMs,
         updatedAt: nowMs,
@@ -170,17 +171,5 @@ export async function runOpmlImport(
   opts?: { now?: () => number }
 ): Promise<OpmlImportResult> {
   const now = (opts?.now || Date.now)();
-  const gate = await refreshScheduler.runExclusive(() => importOpmlUnlocked(opmlText, now));
-  if (gate.skipped) {
-    return {
-      ok: false,
-      skipped: true,
-      reason: "skipped_busy",
-      preview: null,
-      results: [],
-      added: 0,
-      documentTitle: null,
-    };
-  }
-  return gate.result;
+  return runStoreMutation(() => importOpmlUnlocked(opmlText, now));
 }

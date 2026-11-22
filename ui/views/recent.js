@@ -7,6 +7,21 @@ import { episodeRowHtml, moreMenuHtml } from "../lib/rows.js";
 import { notify, onQueueChange, reloadRecent, reloadSubs } from "../lib/actions.js";
 import { api } from "../lib/api.js";
 import {
+  REFRESH_BUSY_TOAST,
+  REFRESH_STILL_RUNNING_TOAST,
+  applyRefreshButtonBusy,
+  applyRefreshHint,
+  humanizeRefreshFailure,
+  isFeedRefreshing,
+  isSkippedBusy,
+  onFeedRefreshState,
+  runFeedRefresh,
+  trackRemoteRefreshBusy,
+  waitUntilFeedRefreshIdle,
+  wrapRefreshCall,
+} from "../lib/feedRefresh.js";
+import { markFeedSynced } from "../lib/uiCache.js";
+import {
   buildQueueIndex,
   queueButtonAttrs,
   queueButtonState,
@@ -62,10 +77,14 @@ export function renderRecent() {
   const sig = recentListSignature(items);
   if (box.dataset.renderSig === sig) return;
   box.dataset.renderSig = sig;
+  box.classList.remove("is-skeleton");
   if (!items.length) {
+    // Boot may still be fetching cache; avoid flashing the permanent empty copy.
+    if (box.dataset.bootPending === "1") return;
     box.innerHTML = '<div class="empty">还没有更新。先在「订阅」里添加频道。</div>';
     return;
   }
+  delete box.dataset.bootPending;
   const queueIndex = buildQueueIndex(getData().queueSongs);
 
   const groups = new Map();
@@ -130,22 +149,61 @@ export function bindRecentQueueState() {
   });
 }
 
+/** Shared feed refresh used by the toolbar and the once-per-page-open boot path. */
+export function requestFeedRefresh({ quietBusy = false } = {}) {
+  if (isFeedRefreshing()) return Promise.resolve({ noop: true });
+  return runFeedRefresh({
+    refreshAll: () => wrapRefreshCall(() => api.refreshAll()),
+    afterRefresh: async (r) => {
+      if (!r || r.noop) return;
+      if (!r.ok && (r.skipped || isSkippedBusy(r))) {
+        // Looked idle at click time but server lock was held.
+        if (!quietBusy) notify(REFRESH_BUSY_TOAST, "warn");
+        await trackRemoteRefreshBusy(api);
+        return;
+      }
+      if (r.started) {
+        const wait = await waitUntilFeedRefreshIdle(api);
+        if (wait.timedOut) {
+          if (!quietBusy) notify(REFRESH_STILL_RUNNING_TOAST, "warn");
+          return;
+        }
+      }
+      await reloadRecent();
+      await reloadSubs();
+      markFeedSynced();
+      // No success toast when feeds are already up to date / async accept has no "added" count.
+      if (!quietBusy && r.ok === false && !r.started && !isSkippedBusy(r)) {
+        notify(humanizeRefreshFailure(r, "部分刷新失败"), "warn");
+      }
+    },
+  });
+}
+
 /** Wire the recent toolbar (refresh only; the old「全部加入」was removed). */
 export function bindRecentToolbar() {
   const btn = $("btnRecentRefresh");
+  const hint = $("recentRefreshHint");
   if (!btn) return;
+
+  onFeedRefreshState((busy) => {
+    applyRefreshButtonBusy(btn, busy);
+    applyRefreshHint(hint, busy);
+  });
+
   btn.addEventListener("click", async () => {
-    btn.disabled = true;
+    if (isFeedRefreshing()) return;
     try {
-      const r = await api.refreshAll();
-      if (!r.ok && r.skipped) notify("忙碌中，请稍后", "warn");
-      else notify(r.ok ? "已刷新" : "部分刷新失败", r.ok ? "ok" : "warn");
-      await reloadRecent();
-      await reloadSubs();
+      const r = await requestFeedRefresh({ quietBusy: false });
+      if (r && r.noop) return;
+      renderRecent();
     } catch (e) {
-      notify(String(e), "err");
-    } finally {
-      btn.disabled = false;
+      if (isSkippedBusy(e)) {
+        notify(REFRESH_BUSY_TOAST, "warn");
+        void trackRemoteRefreshBusy(api);
+        return;
+      }
+      notify(humanizeRefreshFailure(e), "err");
     }
   });
 }

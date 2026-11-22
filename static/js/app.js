@@ -26,6 +26,7 @@
     star: '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>',
     checkCircle: '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline>',
     x: '<path d="M18 6 6 18"></path><path d="m6 6 12 12"></path>',
+    arrowLeft: '<path d="m12 19-7-7 7-7"></path><path d="M19 12H5"></path>',
     moreHorizontal: '<circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle>',
     moreVertical: '<circle cx="12" cy="12" r="1"></circle><circle cx="12" cy="5" r="1"></circle><circle cx="12" cy="19" r="1"></circle>',
     rotateCcw: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path><path d="M3 3v5h5"></path>',
@@ -83,9 +84,66 @@
     });
   }
 
+  // ui/lib/toast.js
+  var timer = null;
+  var el = null;
+  var mountParent = null;
+  function resolveMount() {
+    if (mountParent && mountParent.isConnected) return mountParent;
+    return document.body;
+  }
+  function ensure() {
+    const host = resolveMount();
+    if (el && el.isConnected) {
+      if (el.parentElement !== host) host.appendChild(el);
+      return el;
+    }
+    el = document.createElement("div");
+    el.id = "toast";
+    el.className = "toast";
+    el.setAttribute("role", "status");
+    el.setAttribute("aria-live", "polite");
+    host.appendChild(el);
+    return el;
+  }
+  function setToastMount(parent) {
+    mountParent = parent && typeof parent.appendChild === "function" && parent.isConnected ? parent : null;
+    if (!el) return;
+    const host = resolveMount();
+    if (el.isConnected) {
+      if (el.parentElement !== host) host.appendChild(el);
+    } else if (el.classList.contains("show")) {
+      host.appendChild(el);
+    }
+  }
+  var SILENT = /^(继续播放|已开始播放|已继续收听|继续收听|正在加载剧集…)$/;
+  function toast(text, kind) {
+    const node = ensure();
+    const msg = String(text ?? "");
+    if (!msg.trim()) {
+      node.classList.remove("show");
+      return;
+    }
+    const brief = SILENT.test(msg.trim());
+    node.className = `toast show ${kind || "muted"}${brief ? " toast--brief" : ""}`;
+    node.textContent = msg;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(
+      () => {
+        node.classList.remove("show");
+      },
+      kind === "err" ? 4600 : brief ? 1600 : 2800
+    );
+  }
+  function clearToast() {
+    if (el) el.classList.remove("show");
+    if (timer) clearTimeout(timer);
+  }
+
   // ui/lib/modal.js
   var modalRoot = null;
   var modalResolve = null;
+  var modalOnClose = null;
   function ensureModalRoot() {
     if (modalRoot && modalRoot.isConnected) return modalRoot;
     const dialog = document.createElement("dialog");
@@ -108,22 +166,46 @@
   function closeModal(result) {
     const dialog = modalRoot;
     if (!dialog) return;
+    setToastMount(null);
     if (typeof dialog.close === "function" && dialog.open) dialog.close();
     else dialog.removeAttribute("open");
     dialog.classList.remove("modal--wide", "modal--sheet");
     const foot = dialog.querySelector("#appModalFoot");
-    if (foot) foot.className = "modal__foot";
+    if (foot) {
+      foot.className = "modal__foot";
+      foot.style.display = "";
+    }
+    const head = dialog.querySelector(".modal__head");
+    if (head) head.classList.remove("modal__head--nav");
     const done = modalResolve;
+    const onClose = modalOnClose;
     modalResolve = null;
+    modalOnClose = null;
+    if (typeof onClose === "function") onClose(result);
     if (done) done(result);
   }
   function openModal(opts = {}) {
     const dialog = ensureModalRoot();
+    const headEl = dialog.querySelector(".modal__head");
     const titleEl = dialog.querySelector("#appModalTitle");
+    const closeBtn = dialog.querySelector("#appModalClose");
     const bodyEl = dialog.querySelector("#appModalBody");
     const footEl = dialog.querySelector("#appModalFoot");
     dialog.classList.toggle("modal--wide", opts.size === "wide");
     dialog.classList.toggle("modal--sheet", opts.size === "sheet");
+    modalOnClose = typeof opts.onClose === "function" ? opts.onClose : null;
+    const closeLabel = opts.closeLabel || "\u5173\u95ED";
+    const closeIcon = opts.closeIcon || "x";
+    closeBtn.innerHTML = icon(closeIcon, 16);
+    closeBtn.setAttribute("aria-label", closeLabel);
+    closeBtn.title = closeLabel;
+    if (opts.closeLeading) {
+      headEl.classList.add("modal__head--nav");
+      if (closeBtn.nextElementSibling !== titleEl) headEl.insertBefore(closeBtn, titleEl);
+    } else {
+      headEl.classList.remove("modal__head--nav");
+      if (titleEl.nextElementSibling !== closeBtn) headEl.appendChild(closeBtn);
+    }
     titleEl.innerHTML = opts.title ? escapeHtml(opts.title) : "";
     titleEl.style.display = opts.title ? "" : "none";
     bodyEl.innerHTML = "";
@@ -131,7 +213,8 @@
     else if (typeof opts.body === "string") bodyEl.innerHTML = opts.body;
     footEl.className = "modal__foot" + (opts.footClass ? ` ${opts.footClass}` : "");
     footEl.innerHTML = "";
-    const actions = opts.actions || [{ label: "\u5173\u95ED", value: void 0, close: true }];
+    const actions = Array.isArray(opts.actions) ? opts.actions : [{ label: "\u5173\u95ED", value: void 0, close: true }];
+    footEl.style.display = actions.length ? "" : "none";
     for (const action of actions) {
       const btn = document.createElement("button");
       btn.type = "button";
@@ -171,6 +254,7 @@
     });
     if (typeof dialog.showModal === "function") dialog.showModal();
     else dialog.setAttribute("open", "open");
+    setToastMount(dialog);
     return promise;
   }
   async function uiConfirm(opts = {}) {
@@ -218,15 +302,54 @@
     openPopover = wrap;
     positionPopover(wrap);
   }
+  function isClippingOverflow(value) {
+    return value === "auto" || value === "hidden" || value === "scroll" || value === "overlay" || value === "clip";
+  }
+  function nearestClippingAncestor(el2) {
+    let node = el2 && el2.parentElement;
+    while (node && node !== document.body && node !== document.documentElement) {
+      const style = typeof window.getComputedStyle === "function" ? window.getComputedStyle(node) : null;
+      if (style && (isClippingOverflow(style.overflow) || isClippingOverflow(style.overflowX) || isClippingOverflow(style.overflowY))) {
+        return node;
+      }
+      node = node.parentElement;
+    }
+    return null;
+  }
+  function clipBounds(wrap) {
+    const view = { left: 0, right: window.innerWidth, top: 0, bottom: window.innerHeight };
+    const clip = nearestClippingAncestor(wrap);
+    if (!clip || typeof clip.getBoundingClientRect !== "function") return view;
+    const r = clip.getBoundingClientRect();
+    return {
+      left: Math.max(view.left, r.left),
+      right: Math.min(view.right, r.right),
+      top: Math.max(view.top, r.top),
+      bottom: Math.min(view.bottom, r.bottom)
+    };
+  }
   function positionPopover(wrap) {
     const menu = wrap.querySelector(".more-menu");
     if (!menu) return;
     menu.classList.remove("more-menu--up");
+    menu.classList.remove("more-menu--start");
     const rect = wrap.getBoundingClientRect();
-    const spaceBelow = window.innerHeight - rect.bottom;
     const menuHeight = menu.offsetHeight || 160;
-    if (spaceBelow < menuHeight + 12 && rect.top > menuHeight + 12) {
+    const clip = clipBounds(wrap);
+    const spaceBelow = clip.bottom - rect.bottom;
+    const spaceAbove = rect.top - clip.top;
+    if (spaceBelow < menuHeight + 12 && spaceAbove > menuHeight + 12) {
       menu.classList.add("more-menu--up");
+    }
+    const menuWidth = menu.offsetWidth || 148;
+    const overflowsLeft = rect.right - menuWidth < clip.left + 12;
+    const overflowsRight = rect.left + menuWidth > clip.right - 12;
+    if (overflowsLeft && overflowsRight) {
+      const spaceLeft = rect.right - clip.left;
+      const spaceRight = clip.right - rect.left;
+      if (spaceRight > spaceLeft) menu.classList.add("more-menu--start");
+    } else if (overflowsLeft) {
+      menu.classList.add("more-menu--start");
     }
   }
   function bindPopoverDismiss() {
@@ -238,43 +361,6 @@
     document.addEventListener("keydown", (ev) => {
       if (ev.key === "Escape") closePopovers();
     });
-  }
-
-  // ui/lib/toast.js
-  var timer = null;
-  var el = null;
-  function ensure() {
-    if (el && el.isConnected) return el;
-    el = document.createElement("div");
-    el.id = "toast";
-    el.className = "toast";
-    el.setAttribute("role", "status");
-    el.setAttribute("aria-live", "polite");
-    document.body.appendChild(el);
-    return el;
-  }
-  var SILENT = /^(继续播放|已开始播放|已继续收听|继续收听|正在加载剧集…)$/;
-  function toast(text, kind) {
-    const node = ensure();
-    const msg = String(text ?? "");
-    if (!msg.trim()) {
-      node.classList.remove("show");
-      return;
-    }
-    const brief = SILENT.test(msg.trim());
-    node.className = `toast show ${kind || "muted"}${brief ? " toast--brief" : ""}`;
-    node.textContent = msg;
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(
-      () => {
-        node.classList.remove("show");
-      },
-      kind === "err" ? 4600 : brief ? 1600 : 2800
-    );
-  }
-  function clearToast() {
-    if (el) el.classList.remove("show");
-    if (timer) clearTimeout(timer);
   }
 
   // ui/lib/host.js
@@ -344,9 +430,6 @@
   function onStateChange(cb) {
     return requirePlayer().onStateChange(cb);
   }
-  async function seek(seconds) {
-    return requirePlayer().seek(Number(seconds));
-  }
   async function replaceQueueAndPlay(songIds, startIndex, opts = {}) {
     const player = requireSetQueue();
     const options = { startIndex: startIndex == null ? 0 : Number(startIndex) };
@@ -376,7 +459,9 @@
     error: null,
     hostHint: null,
     progressCapable: true,
-    hostSongId: null
+    hostSongId: null,
+    /** Host getState source_playlist_id; locks only plugin「播客」sessions. */
+    sourcePlaylistId: null
   };
   var clock = { wallMs: 0, positionSec: 0, running: false };
   function syncClock(positionSec, running) {
@@ -448,6 +533,11 @@
   }
   function applyHostState(hostState) {
     if (!hostState) return;
+    {
+      const raw = hostState.source_playlist_id != null ? hostState.source_playlist_id : hostState.sourcePlaylistId;
+      const n = Number(raw);
+      set({ sourcePlaylistId: Number.isFinite(n) && n > 0 ? n : null });
+    }
     const playing = !!hostState.is_playing;
     const cur = hostState.current_song;
     const hostSongId = cur && typeof cur.id === "number" ? cur.id : null;
@@ -673,6 +763,37 @@
     };
   }
 
+  // ui/lib/castPlan.js
+  function queueSongIds(queueSongs) {
+    return (Array.isArray(queueSongs) ? queueSongs : []).map((s) => Number(s && (s.id != null ? s.id : s.songId))).filter((id) => Number.isFinite(id) && id > 0);
+  }
+  function queueIdsWithFront(queueSongs, songId) {
+    const ids = queueSongIds(queueSongs);
+    const tid = Number(songId);
+    if (!Number.isFinite(tid) || tid <= 0) return ids;
+    return [tid, ...ids.filter((id) => id !== tid)];
+  }
+  function resolveSpeakerCastPlan({ songId, forceSingle, queueSongs } = {}) {
+    const id = Number(songId);
+    if (!Number.isFinite(id) || id <= 0) return null;
+    if (forceSingle) return { kind: "one", songId: id, songIds: [id] };
+    return { kind: "queue", songId: id, songIds: queueIdsWithFront(queueSongs, id) };
+  }
+  function buildCastMiotPlaylistBody({ deviceId, songIds, startIndex, songId } = {}) {
+    const body = {};
+    if (Array.isArray(songIds) && songIds.length) {
+      body.songIds = songIds.map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0);
+    }
+    if (startIndex != null && startIndex !== "") {
+      const idx = Number(startIndex);
+      if (Number.isFinite(idx) && idx >= 0) body.startIndex = idx;
+    }
+    const sid = Number(songId);
+    if (Number.isFinite(sid) && sid > 0) body.songId = sid;
+    if (typeof deviceId === "string" && deviceId.trim()) body.deviceId = deviceId;
+    return body;
+  }
+
   // ui/lib/api.js
   var bridge = () => typeof window !== "undefined" ? window.SongloftPlugin : null;
   function requireBridge() {
@@ -708,10 +829,43 @@
     saveSettings: (body) => post("/api/settings", body),
     listSubscriptions: () => get2("/api/subscriptions"),
     addSubscription: (url) => post("/api/subscriptions", { url }),
-    getEpisodes: (id) => get2(`/api/subscriptions/${enc(id)}/episodes`),
+    getEpisodes: async (id, opts = {}) => {
+      const singlePage = !!(opts && opts.limit != null && opts.follow !== true);
+      const episodes = [];
+      let offset = opts && opts.offset != null ? Number(opts.offset) : 0;
+      let last = null;
+      let guard = 0;
+      while (guard++ < 1e3) {
+        const q = new URLSearchParams();
+        if (offset) q.set("offset", String(offset));
+        if (opts && opts.limit != null) q.set("limit", String(opts.limit));
+        const qs = q.toString();
+        const r = await get2(`/api/subscriptions/${enc(id)}/episodes${qs ? `?${qs}` : ""}`);
+        last = r;
+        if (!r || !r.ok) return r;
+        const batch = Array.isArray(r.episodes) ? r.episodes : [];
+        episodes.push(...batch);
+        if (singlePage || !r.hasMore) {
+          return {
+            ...r,
+            episodes: singlePage ? batch : episodes,
+            total: r.total != null ? r.total : episodes.length,
+            offset: singlePage ? r.offset : 0,
+            hasMore: singlePage ? !!r.hasMore : false,
+            nextOffset: r.nextOffset
+          };
+        }
+        const next = Number(r.nextOffset);
+        if (!Number.isFinite(next) || next <= offset || !batch.length) break;
+        offset = next;
+      }
+      return last ? { ...last, episodes, hasMore: false, offset: 0, total: last.total != null ? last.total : episodes.length } : last;
+    },
     refreshOne: (id) => post(`/api/subscriptions/${enc(id)}/refresh`, {}),
+    indexHistory: (id) => post(`/api/subscriptions/${enc(id)}/index-history`, {}),
     refreshAll: () => post("/api/refresh", {}),
     deleteSubscription: (id) => del(`/api/subscriptions/${enc(id)}`),
+    batchDeleteSubscriptions: (ids) => post("/api/subscriptions/batch-delete", { ids }),
     updateSubscriptionUrl: (id, url) => put(`/api/subscriptions/${enc(id)}`, { url }),
     prepare: (body) => post("/api/episodes/prepare", body),
     queue: () => get2("/api/queue"),
@@ -720,6 +874,8 @@
     queueRemove: (songIds) => post("/api/queue/remove", { songIds }),
     queueRemovePlayed: () => post("/api/queue/remove-played", {}),
     queueMove: (songId, direction) => post("/api/queue/move", { songId, direction }),
+    /** Move one episode to row 0 of「播客」before a play/cast. */
+    queuePlayFront: (songId) => post("/api/queue/play-front", { songId }),
     queueReorder: (songIds) => post("/api/queue/reorder", { songIds }),
     queueClear: () => post("/api/queue/clear", {}),
     queueAddIds: (songIds) => post("/api/queue/add-ids", { songIds }),
@@ -738,7 +894,8 @@
     opmlImport: (text) => post("/api/opml/import", { opml: text }),
     opmlExport: () => get2("/api/opml/export"),
     castMiot: (songId, deviceId) => post("/api/cast/miot", deviceId ? { songId, deviceId } : { songId }),
-    castMiotPlaylist: (playlistId, deviceId) => post("/api/cast/miot-playlist", deviceId ? { deviceId } : {}),
+    /** @param {{ deviceId?: string, songIds?: number[], startIndex?: number, songId?: number }} [opts] */
+    castMiotPlaylist: (opts = {}) => post("/api/cast/miot-playlist", buildCastMiotPlaylistBody(opts)),
     castStatus: () => get2("/api/cast/status")
   };
 
@@ -758,10 +915,6 @@
   };
   function getData() {
     return data;
-  }
-  function subscribe(fn) {
-    listeners2.add(fn);
-    return () => listeners2.delete(fn);
   }
   function patch(next) {
     Object.assign(data, next);
@@ -942,6 +1095,34 @@
     }
     return next;
   }
+  function buildOptimisticPinnedSong(episode, songId) {
+    const id = Number(songId);
+    const cover = episode && (episode.coverUrl || episode.cover_url) || "";
+    return {
+      id,
+      title: episode && episode.title || "",
+      artist: episode && (episode.showTitle || episode.artist) || "",
+      album: episode && (episode.showTitle || episode.album) || "",
+      coverUrl: cover || null,
+      cover_url: cover,
+      feedUrl: episode && episode.feedUrl || null,
+      guid: episode && episode.guid || null,
+      subscriptionId: episode && episode.subscriptionId || null,
+      duration: episode && (episode.durationSec != null ? episode.durationSec : episode.duration),
+      favorited: !!(episode && episode.favorited),
+      progress: episode && episode.progress || null
+    };
+  }
+  function pinQueueSongsLocally(songs, orderedIds, episode) {
+    const list = Array.isArray(songs) ? songs.slice() : [];
+    const ids = (Array.isArray(orderedIds) ? orderedIds : []).map(Number).filter(Number.isFinite);
+    const targetId = ids.length ? ids[0] : NaN;
+    let nextList = list;
+    if (Number.isFinite(targetId) && !list.some((s) => Number(s && s.id) === targetId)) {
+      nextList = [buildOptimisticPinnedSong(episode, targetId), ...list];
+    }
+    return reorderSongs(nextList, ids.length ? ids : nextList.map((s) => s && s.id));
+  }
   function episodeIdentity(ep) {
     const feed = String(ep && ep.feedUrl || "").trim().replace(/\/+$/, "").toLowerCase();
     const guid = String(ep && ep.guid || "").trim();
@@ -987,13 +1168,14 @@
   }
 
   // ui/lib/playThrough.js
-  var PLAY_THROUGH_LABEL = "\u4ECE\u8FD9\u4E00\u96C6\u5F00\u59CB\uFF0C\u6309\u64AD\u653E\u5217\u8868\u987A\u5E8F\u7EE7\u7EED";
+  var PLAY_THROUGH_LABEL = "\u4ECE\u8FD9\u4E00\u96C6\u5F00\u59CB\uFF0C\u987A\u5E8F\u64AD\u5B8C\u300C\u64AD\u5BA2\u300D\u5217\u8868";
+  var PLAY_ONE_LABEL = "\u64AD\u653E\u8FD9\u4E00\u96C6";
   var SET_QUEUE_UNAVAILABLE = "\u5BBF\u4E3B\u4E0D\u652F\u6301\u6574\u8868\u64AD\u653E\u3002\u8BF7\u5728 Songloft \u5BA2\u6237\u7AEF\u5185\u6253\u5F00\u672C\u63D2\u4EF6\uFF0C\u6216\u5347\u7EA7\u5BBF\u4E3B\u540E\u518D\u8BD5\u3002";
   var PLAY_FROM_START_TITLE = "\u4ECE\u5217\u8868\u5F00\u5934\u64AD\u653E";
-  var PLAY_FROM_START_MESSAGE = "\u5C06\u7528\u300C\u64AD\u5BA2\u300D\u5217\u8868\u66FF\u6362\u5F53\u524D\u6B63\u5728\u64AD\u653E\u7684\u5185\u5BB9\uFF0C\u5E76\u4ECE\u7B2C\u4E00\u9996\u5F00\u59CB\u3002\u64AD\u5B8C\u4E00\u96C6\u540E\u4F1A\u81EA\u52A8\u7EE7\u7EED\u4E0B\u4E00\u96C6\u3002";
+  var PLAY_FROM_START_MESSAGE = "\u4F1A\u7528\u300C\u64AD\u5BA2\u300D\u5217\u8868\u66FF\u6362\u5F53\u524D\u6B63\u5728\u64AD\u653E\u7684\u5185\u5BB9\uFF0C\u5E76\u4ECE\u7B2C\u4E00\u9996\u5F00\u59CB\u3002\u6309\u987A\u5E8F\u64AD\u5230\u672B\u5C3E\u540E\u505C\u6B62\uFF0C\u4E0D\u5FAA\u73AF\u3002";
   var PLAY_FROM_START_OK = "\u5F00\u59CB\u64AD\u653E";
   var SINGLE_MODE_TITLE = "\u6539\u4E3A\u987A\u5E8F\u64AD\u653E\uFF1F";
-  var SINGLE_MODE_MESSAGE = "\u5F53\u524D\u662F\u5355\u66F2\u6A21\u5F0F\uFF0C\u64AD\u5B8C\u8FD9\u4E00\u96C6\u540E\u4E0D\u4F1A\u81EA\u52A8\u7EE7\u7EED\u4E0B\u4E00\u96C6\u3002\u6539\u4E3A\u987A\u5E8F\u64AD\u653E\u540E\uFF0C\u4F1A\u6309\u300C\u64AD\u5BA2\u300D\u5217\u8868\u7EE7\u7EED\u3002";
+  var SINGLE_MODE_MESSAGE = "\u5F53\u524D\u4E0D\u662F\u987A\u5E8F\u64AD\u653E\u3002\u6539\u4E3A\u987A\u5E8F\u64AD\u653E\u540E\uFF0C\u4F1A\u6309\u300C\u64AD\u5BA2\u300D\u5217\u8868\u64AD\u5230\u672B\u5C3E\u518D\u505C\u6B62\uFF0C\u4E0D\u5FAA\u73AF\u3002";
   var SINGLE_MODE_OK = "\u6539\u4E3A\u987A\u5E8F\u64AD\u653E";
   function episodeSongId(ep) {
     if (!ep) return null;
@@ -1002,11 +1184,11 @@
     const n = Number(raw);
     return Number.isFinite(n) ? n : null;
   }
-  function playButtonLabel({ isCurrent, phase, pending } = {}) {
+  function playButtonLabel({ isCurrent, phase, pending, fromWaitlist } = {}) {
     if (pending) return "\u6B63\u5728\u52A0\u5165\u2026";
     if (isCurrent && phase === "playing") return "\u6682\u505C";
     if (isCurrent) return "\u7EE7\u7EED";
-    return PLAY_THROUGH_LABEL;
+    return fromWaitlist ? PLAY_THROUGH_LABEL : PLAY_ONE_LABEL;
   }
   function readyQueueSongIds(songs) {
     const ids = [];
@@ -1023,12 +1205,8 @@
     if (tid == null || !Number.isFinite(tid)) {
       return { ids, startIndex: 0 };
     }
-    let startIndex = ids.indexOf(tid);
-    if (startIndex < 0) {
-      ids.push(tid);
-      startIndex = ids.length - 1;
-    }
-    return { ids, startIndex };
+    const rest = ids.filter((id) => id !== tid);
+    return { ids: [tid, ...rest], startIndex: 0 };
   }
   function isSinglePlayMode(mode) {
     return mode === "single" || mode === "singlePlay";
@@ -1038,10 +1216,28 @@
     const mode = state3.play_mode != null ? state3.play_mode : state3.playMode;
     return mode == null || mode === "" ? null : String(mode);
   }
+
+  // ui/lib/playSession.js
+  function pickNumber(...values) {
+    for (const value of values) {
+      if (typeof value === "number" && Number.isFinite(value)) return value;
+      if (typeof value === "string" && value.trim() !== "") {
+        const n = Number(value);
+        if (Number.isFinite(n)) return n;
+      }
+    }
+    return null;
+  }
+  function pickBoolean(...values) {
+    for (const value of values) {
+      if (typeof value === "boolean") return value;
+    }
+    return null;
+  }
   function extractQueueIds(state3) {
-    if (!state3) return null;
+    if (!state3) return [];
     const raw = state3.queue || state3.songs || state3.song_ids || state3.songIds || state3.playlist && (state3.playlist.songs || state3.playlist.song_ids);
-    if (!Array.isArray(raw)) return null;
+    if (!Array.isArray(raw)) return [];
     const ids = [];
     for (const item of raw) {
       if (typeof item === "number" && Number.isFinite(item)) {
@@ -1055,12 +1251,89 @@
     }
     return ids;
   }
-  function hostQueueMatches(state3, ids) {
-    const want = (Array.isArray(ids) ? ids : []).map(Number);
-    if (!want.length) return false;
-    const queueIds = extractQueueIds(state3);
-    if (!queueIds || queueIds.length !== want.length) return false;
-    return queueIds.every((id, i) => id === want[i]);
+  function readHostPlayback(state3) {
+    if (!state3 || typeof state3 !== "object") {
+      return {
+        available: false,
+        currentId: null,
+        currentTime: null,
+        isPlaying: null,
+        queue: [],
+        currentIndex: null,
+        sourcePlaylistId: null
+      };
+    }
+    const song = state3.current_song != null ? state3.current_song : state3.currentSong;
+    const currentId = song && song.id != null ? pickNumber(song.id) : null;
+    return {
+      available: true,
+      currentId,
+      currentTime: pickNumber(state3.current_time, state3.currentTime),
+      isPlaying: pickBoolean(state3.is_playing, state3.isPlaying),
+      queue: extractQueueIds(state3),
+      currentIndex: pickNumber(state3.current_index, state3.currentIndex),
+      sourcePlaylistId: pickNumber(state3.source_playlist_id, state3.sourcePlaylistId)
+    };
+  }
+  var REPLACE_PLAYBACK_TITLE = "\u66FF\u6362\u5F53\u524D\u64AD\u653E\uFF1F";
+  var REPLACE_PLAYBACK_MESSAGE = "\u5F53\u524D\u6B63\u5728\u64AD\u653E\u5176\u4ED6\u5185\u5BB9\uFF0C\u6216\u65E0\u6CD5\u786E\u8BA4\u73B0\u5728\u64AD\u7684\u662F\u54EA\u4E00\u96C6\u3002\u786E\u5B9A\u540E\u4F1A\u5148\u628A\u8FD9\u4E00\u96C6\u79FB\u5230\u300C\u64AD\u5BA2\u300D\u5217\u8868\u7B2C\u4E00\u4F4D\uFF0C\u518D\u66FF\u6362\u5F53\u524D\u64AD\u653E\uFF1B\u53D6\u6D88\u5219\u4FDD\u6301\u73B0\u5728\u7684\u64AD\u653E\u548C\u5217\u8868\u987A\u5E8F\u4E0D\u53D8\u3002";
+  var REPLACE_PLAYBACK_OK = "\u8C03\u6574\u5217\u8868\u5E76\u64AD\u653E";
+  function normalizeIds(ids) {
+    return (Array.isArray(ids) ? ids : []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0);
+  }
+  function frontOrderedIds(intendedIds, targetSongId) {
+    const tid = Number(targetSongId);
+    const ids = normalizeIds(intendedIds).filter((id) => id !== tid);
+    if (Number.isFinite(tid) && tid > 0) ids.unshift(tid);
+    return ids;
+  }
+  function isFrontEpisode(host, targetSongId) {
+    if (!host || !host.available || host.currentId == null) return false;
+    if (Number(host.currentId) !== Number(targetSongId)) return false;
+    if (host.currentIndex != null) {
+      if (host.currentIndex !== 0) return false;
+      if (host.queue.length) return Number(host.queue[0]) === Number(targetSongId);
+      return true;
+    }
+    if (host.queue.length) return Number(host.queue[0]) === Number(targetSongId);
+    return true;
+  }
+  function isIdle(host) {
+    if (!host || !host.available) return false;
+    return host.currentId == null && (!host.queue || host.queue.length === 0) && host.isPlaying !== true;
+  }
+  function sameSourcePlaylist(host, podcastPlaylistId) {
+    if (!host || !host.available) return false;
+    const want = Number(podcastPlaylistId);
+    if (!Number.isFinite(want) || want <= 0) return false;
+    return host.sourcePlaylistId != null && Number(host.sourcePlaylistId) === want;
+  }
+  function decidePlayAction({ host, targetSongId, intendedIds, podcastPlaylistId } = {}) {
+    const ids = frontOrderedIds(intendedIds, targetSongId);
+    const base = { ids, startIndex: 0, playMode: "order" };
+    if (!host || !host.available) {
+      return { type: "confirm-replace", ...base, reason: "unknown" };
+    }
+    if (isIdle(host)) {
+      return { type: "set-queue", ...base };
+    }
+    if (isFrontEpisode(host, targetSongId)) {
+      if (host.isPlaying === true) return { type: "noop-playing", ...base };
+      if (host.isPlaying === false) return { type: "resume", ...base };
+      return { type: "confirm-replace", ...base, reason: "unknown-playing-state" };
+    }
+    if (host.currentId != null && Number(host.currentId) === Number(targetSongId)) {
+      if (sameSourcePlaylist(host, podcastPlaylistId)) return { type: "set-queue", ...base };
+      return { type: "confirm-replace", ...base, reason: "not-in-front" };
+    }
+    if (host.currentId != null && sameSourcePlaylist(host, podcastPlaylistId)) {
+      return { type: "set-queue", ...base };
+    }
+    return {
+      type: "confirm-replace",
+      ...base,
+      reason: host.currentId != null ? "different-source" : "unknown"
+    };
   }
 
   // ui/lib/actions.js
@@ -1158,24 +1431,23 @@
       }
       if (!r.ok) {
         patch({ queueSongs: [], queueMeta: null });
+        repaintQueueButtonsNow();
+        notifyQueueViews();
         return getData();
       }
       patch({
         queueSongs: r.songs || [],
         queueMeta: { playlistId: r.playlistId, playlistName: r.playlistName }
       });
-      const data2 = getData();
-      for (const fn of queueRepainters) {
-        try {
-          fn(buildQueueIndex(data2.queueSongs));
-        } catch (_) {
-        }
-      }
+      repaintQueueButtonsNow();
+      notifyQueueViews();
     } catch (e) {
       if (queueWrites.isPending() || !shouldApplyQueueResponse(token, queueWrites)) {
         return getData();
       }
       patch({ queueSongs: [], queueMeta: null });
+      repaintQueueButtonsNow();
+      notifyQueueViews();
       notify("\u8BFB\u53D6\u64AD\u653E\u5217\u8868\u5931\u8D25\uFF08\u9700\u5BBF\u4E3B playlists \u6743\u9650\uFF09", "warn");
     }
     return getData();
@@ -1209,12 +1481,56 @@
     queueRevealers.add(fn);
     return () => queueRevealers.delete(fn);
   }
-  function ensureQueueVisible() {
-    for (const fn of queueRevealers) {
-      try {
-        fn();
-      } catch (_) {
+  var queuePinRunner = null;
+  function setQueuePinRunner(fn) {
+    queuePinRunner = typeof fn === "function" ? fn : null;
+  }
+  async function runQueuePinPhase(phase, songId) {
+    if (typeof queuePinRunner !== "function") return;
+    try {
+      await queuePinRunner(phase, songId);
+    } catch (_) {
+    }
+  }
+  function playFrontTargetIsFirst(result, songId) {
+    if (!result || result.ok === false) return false;
+    const ids = Array.isArray(result.songIds) ? result.songIds.map(Number) : [];
+    return ids.length > 0 && ids[0] === Number(songId);
+  }
+  var PLAY_FRONT_FAIL = "\u672A\u80FD\u628A\u8FD9\u4E00\u96C6\u5199\u5230\u300C\u64AD\u5BA2\u300D\u5217\u8868\u7B2C\u4E00\u4F4D\u3002\u5F53\u524D\u64AD\u653E\u987A\u5E8F\u672A\u6539\uFF0C\u7A0D\u540E\u53EF\u5237\u65B0\u5217\u8868\u6838\u5BF9\u3002";
+  async function persistPlayFrontAfterStart({ songId, episode, gen, playlistIdRef }) {
+    try {
+      const moved = await api.queuePlayFront(songId);
+      if (!playFrontTargetIsFirst(moved, songId)) {
+        notify(
+          moved && moved.error ? `${PLAY_FRONT_FAIL}\uFF08${String(moved.error)}\uFF09` : PLAY_FRONT_FAIL,
+          "err"
+        );
+        return;
       }
+      if (Number.isFinite(Number(moved.playlistId))) {
+        const playlistId = Number(moved.playlistId);
+        if (playlistIdRef) playlistIdRef.value = playlistId;
+        if (moved.playlistName) {
+          const data2 = getData();
+          patch({
+            queueMeta: {
+              playlistId,
+              playlistName: moved.playlistName
+            },
+            queueSongs: data2.queueSongs
+          });
+        }
+      }
+      applyQueueOrderLocally(
+        moved.songIds.map(Number).filter(Number.isFinite),
+        episode
+      );
+      await reloadQueueIfCurrent(gen);
+    } catch (e) {
+      notify(`${PLAY_FRONT_FAIL}\uFF08${String(e && e.message || e)}\uFF09`, "err");
+    } finally {
+      queueWrites.end();
     }
   }
   async function reloadRecent() {
@@ -1362,35 +1678,33 @@
     }
     return false;
   }
-  async function resumeCurrentIfSame(songId) {
-    const snap = get();
-    if (songId != null && snap.current && snap.current.songId === songId && ["paused", "ended", "playing"].includes(snap.phase)) {
-      await play();
-      const st = await getState();
-      applyHostState(st);
-      return true;
-    }
-    return false;
+  async function confirmReplacePlayback() {
+    return uiConfirm({
+      title: REPLACE_PLAYBACK_TITLE,
+      message: REPLACE_PLAYBACK_MESSAGE,
+      okText: REPLACE_PLAYBACK_OK
+    });
   }
   async function ensureSequentialPlayMode() {
     let st;
     try {
       st = await getState();
     } catch {
-      return;
+      return true;
     }
-    if (!isSinglePlayMode(readPlayMode(st))) return;
+    if (!isSinglePlayMode(readPlayMode(st))) return true;
     const ok = await uiConfirm({
       title: SINGLE_MODE_TITLE,
       message: SINGLE_MODE_MESSAGE,
       okText: SINGLE_MODE_OK
     });
-    if (!ok) return;
+    if (!ok) return false;
     try {
       await setPlayMode("order");
     } catch (e) {
       notify(String(e && e.message || e), "err");
     }
+    return true;
   }
   async function playEpisode(ep, opts = {}) {
     if (!caps.available || !caps.hasPlayer) {
@@ -1399,6 +1713,10 @@
     }
     if (!hasSetQueue()) {
       notify(SET_QUEUE_UNAVAILABLE, "err");
+      return;
+    }
+    if (typeof api.queuePlayFront !== "function") {
+      notify("\u5F53\u524D\u63D2\u4EF6\u7248\u672C\u65E0\u6CD5\u8C03\u6574\u300C\u64AD\u5BA2\u300D\u5217\u8868\u987A\u5E8F\uFF0C\u8BF7\u5237\u65B0\u9875\u9762\u540E\u91CD\u8BD5", "err");
       return;
     }
     let songId = episodeSongId(ep);
@@ -1414,10 +1732,6 @@
       coverUrl: ep.coverUrl || null
     };
     try {
-      if (songId && !opts.forcePrepare && await resumeCurrentIfSame(songId)) {
-        notify("\u7EE7\u7EED\u64AD\u653E\u5F53\u524D\u5355\u96C6", "ok");
-        return;
-      }
       if (!songId || opts.forcePrepare) {
         if (!ep.subscriptionId) {
           notify("\u7F3A\u5C11\u8BA2\u9605\u4FE1\u606F\uFF0C\u65E0\u6CD5\u51C6\u5907\u97F3\u9891", "err");
@@ -1437,74 +1751,85 @@
         songId = prep.songId;
         ctx.songId = songId;
       }
-      const snap0 = get();
-      let resumeAt = 0;
-      const wantResume = opts.resume === true || snap0.current && snap0.current.songId === songId && snap0.positionSec > 5 && snap0.phase !== "ended";
-      if (wantResume) {
-        if (snap0.progressCapable && snap0.positionSec > 5 && snap0.current?.songId === songId) {
-          resumeAt = snap0.positionSec;
-        } else if (ctx.feedUrl && ctx.guid && ctx.guidSource !== "enclosure") {
-          try {
-            const pr = await api.getProgressOne(ctx.feedUrl, ctx.guid);
-            if (pr && pr.ok && pr.progress && pr.progress.positionSec > 5 && !pr.progress.completed) {
-              resumeAt = pr.progress.positionSec;
-            }
-          } catch (_) {
-          }
-        }
-      }
-      const membershipEp = { ...ep, ...ctx, songId };
-      const queuedNow = getData().queueSongs || [];
-      if (!isInPodcastQueue(membershipEp, buildQueueIndex(queuedNow)) && !hasPendingSong(queuedNow, membershipEp)) {
-        const added = await addToQueue(membershipEp, null, { quiet: true });
-        if (!added || !added.ok) {
-          notify("\u672A\u80FD\u52A0\u5165\u64AD\u653E\u5217\u8868\uFF0C\u4ECD\u5C06\u4ECE\u8FD9\u4E00\u96C6\u5F00\u59CB", "warn");
-        }
-      }
-      const { ids, startIndex } = queueIdsForStart(getData().queueSongs, songId);
-      if (!ids.length) {
+      const queueSongs = getData().queueSongs || [];
+      const queueMeta = getData().queueMeta || null;
+      const intendedIds = queueIdsForStart(queueSongs, songId).ids;
+      if (!intendedIds.length) {
         notify("\u6CA1\u6709\u53EF\u64AD\u653E\u7684\u5185\u5BB9", "warn");
         return;
       }
-      await ensureSequentialPlayMode();
       let hostState = null;
       try {
         hostState = await getState();
       } catch (_) {
+        hostState = null;
       }
-      const sameList = hostQueueMatches(hostState, ids);
+      const decision = decidePlayAction({
+        host: readHostPlayback(hostState),
+        targetSongId: songId,
+        intendedIds,
+        podcastPlaylistId: queueMeta ? queueMeta.playlistId : null
+      });
+      if (decision.type === "noop-playing") {
+        notify("\u6B63\u5728\u64AD\u653E\u8FD9\u4E00\u96C6\uFF0C\u4E14\u5DF2\u5728\u300C\u64AD\u5BA2\u300D\u5217\u8868\u7B2C\u4E00\u4F4D\uFF0C\u65E0\u9700\u91CD\u65B0\u5F00\u59CB", "ok");
+        return;
+      }
+      if (decision.type === "resume") {
+        await play();
+        try {
+          applyHostState(await getState());
+        } catch (_) {
+        }
+        notify("\u7EE7\u7EED\u64AD\u653E\u5F53\u524D\u5355\u96C6", "ok");
+        return;
+      }
+      if (decision.type === "confirm-replace") {
+        const ok2 = await confirmReplacePlayback();
+        if (!ok2) return;
+      }
+      const modeOk = await ensureSequentialPlayMode();
+      if (modeOk === false) return;
+      let orderIds = decision.ids;
+      let playlistId = queueMeta ? queueMeta.playlistId : null;
+      const persistGen = beginQueueWrite();
+      await runQueuePinPhase("before", songId);
+      applyQueueOrderLocally(orderIds, { ...ctx, songId, title: ctx.title, showTitle: ctx.showTitle });
+      await runQueuePinPhase("after", songId);
       beginPlayRequest({ ...ctx, songId });
-      if (sameList) {
-        await play(songId);
-      } else {
-        const playlistId = getData().queueMeta && getData().queueMeta.playlistId;
-        await replaceQueueAndPlay(ids, startIndex, { sourcePlaylistId: playlistId });
+      try {
+        await replaceQueueAndPlay(orderIds, 0, {
+          sourcePlaylistId: playlistId == null ? void 0 : playlistId
+        });
+      } catch (e) {
+        playFailed(String(e && e.message || e));
+        notify(
+          `\u64AD\u653E\u8BF7\u6C42\u5931\u8D25\uFF1A${String(e && e.message || e)}\u3002\u5217\u8868\u5DF2\u5728\u672C\u9875\u63D0\u524D\u653E\u5230\u7B2C\u4E00\u4F4D\uFF0C\u6B63\u5728\u540C\u6B65\u5230\u300C\u64AD\u5BA2\u300D\u5217\u8868\u3002`,
+          "err"
+        );
+        void persistPlayFrontAfterStart({
+          songId,
+          episode: { ...ctx, songId },
+          gen: persistGen,
+          playlistIdRef: { value: playlistId }
+        });
+        return;
       }
-      notify(`\u6B63\u5728\u64AD\u653E\u300C${ctx.title || "\u5F53\u524D\u5355\u96C6"}\u300D`, "ok");
+      try {
+        await setPlayMode("order");
+      } catch (_) {
+      }
+      notify(`\u6B63\u5728\u6309\u300C\u64AD\u5BA2\u300D\u5217\u8868\u987A\u5E8F\u64AD\u653E\u300C${ctx.title || "\u5F53\u524D\u5355\u96C6"}\u300D`, "ok");
+      void persistPlayFrontAfterStart({
+        songId,
+        episode: { ...ctx, songId },
+        gen: persistGen,
+        playlistIdRef: { value: playlistId }
+      });
       const ok = await syncPlayStateAfterRequest(songId);
       if (!ok) {
         playFailed("\u64AD\u653E\u672A\u786E\u8BA4\u6210\u529F\uFF08\u5BBF\u4E3B\u672A\u56DE\u62A5\u8BE5\u66F2\u72B6\u6001\uFF09");
         notify("\u64AD\u653E\u672A\u786E\u8BA4\u6210\u529F\u3002\u8BF7\u786E\u8BA4\u5728 Songloft \u5BA2\u6237\u7AEF\u5185\u6253\u5F00\u3002", "err");
         return;
-      }
-      if (resumeAt > 5) {
-        let seekOk = false;
-        try {
-          const st = await getState();
-          if (st && st.current_song && st.current_song.id === songId) {
-            if (typeof st.current_time !== "number") {
-              setProgressCapable(false);
-            } else {
-              await seek(resumeAt);
-              const st2 = await getState();
-              applyHostState(st2);
-              seekOk = st2 && typeof st2.current_time === "number" && Math.abs(st2.current_time - resumeAt) < 15;
-            }
-          }
-        } catch (_) {
-          seekOk = false;
-        }
-        notify(seekOk ? "\u5DF2\u4ECE\u4E0A\u6B21\u4F4D\u7F6E\u7EE7\u7EED\u6536\u542C" : "\u672A\u80FD\u53EF\u9760\u7EED\u542C\uFF0C\u5DF2\u4ECE\u7247\u5934\u9644\u8FD1\u5F00\u59CB", seekOk ? "ok" : "warn");
       }
       if (ctx.feedUrl && ctx.guid) {
         rememberMapping(songId, ctx.feedUrl, ctx.guid);
@@ -1539,55 +1864,17 @@
       notify(String(e && e.message || e), "err");
     }
   }
-  async function togglePlayPause() {
-    const snap = get();
-    const cur = snap.current;
-    try {
-      if (snap.phase === "playing") {
-        await pause();
-        try {
-          applyHostState(await getState());
-        } catch (_) {
-        }
-        await flushProgress();
-        return;
-      }
-      if (cur && cur.songId) {
-        if (await resumeCurrentIfSame(cur.songId)) return;
-        await playEpisode({ ...cur, songId: cur.songId }, { resume: true });
-        return;
-      }
-      const first = getData().queueSongs[0];
-      if (!first) {
-        notify("\u6CA1\u6709\u53EF\u64AD\u653E\u7684\u5185\u5BB9", "warn");
-        return;
-      }
-      await playEpisode({
-        title: first.title,
-        songId: first.id,
-        showTitle: first.album || "",
-        feedUrl: first.feedUrl || "",
-        guid: first.guid || "",
-        subscriptionId: first.subscriptionId || "",
-        coverUrl: first.coverUrl || first.cover_url || null,
-        durationSec: first.duration || null
-      });
-    } catch (e) {
-      notify(String(e), "err");
-    }
-  }
   async function addToQueue(ep, btn, opts = {}) {
     const quiet = !!opts.quiet;
     const data2 = getData();
     const index = buildQueueIndex(data2.queueSongs);
     if (isInPodcastQueue(ep, index)) {
-      if (!quiet) notify(`\u300A${shortTitle(ep.title)}\u300B\u5DF2\u5728\u64AD\u653E\u5217\u8868\u300C\u64AD\u5BA2\u300D\u4E2D`, "warn");
+      if (!quiet) notify(`\u300A${shortTitle(ep.title)}\u300B\u5DF2\u7ECF\u5728\u300C\u64AD\u5BA2\u300D\u5217\u8868\u91CC`, "warn");
       return { ok: true, already: true };
     }
     if (hasPendingSong(data2.queueSongs, ep)) {
       if (!quiet) {
         notify(`\u6B63\u5728\u52A0\u5165\u300A${shortTitle(ep.title)}\u300B\u2026`, "muted");
-        ensureQueueVisible();
       }
       return { ok: false, pending: true };
     }
@@ -1602,7 +1889,6 @@
       queueMeta: before.queueMeta
     });
     notifyQueueViews();
-    ensureQueueVisible();
     try {
       const r = await api.queueAdd({
         subscriptionId: ep.subscriptionId,
@@ -1611,15 +1897,15 @@
       });
       if (!r.ok) {
         rollbackQueue(before, gen);
-        notify(r.error || "\u52A0\u5165\u64AD\u653E\u5217\u8868\u5931\u8D25\uFF08\u51C6\u5907\u97F3\u9891\uFF09", "err");
+        notify(r.error || "\u52A0\u5165\u300C\u64AD\u5BA2\u300D\u5217\u8868\u5931\u8D25\uFF08\u51C6\u5907\u97F3\u9891\uFF09", "err");
         return { ok: false };
       }
       const name = r.playlistName || "\u64AD\u5BA2";
       if (!quiet) {
         const bits = [];
-        if (r.added > 0) bits.push(`\u5DF2\u5C06\u300A${shortTitle(ep.title)}\u300B\u52A0\u5165\u64AD\u653E\u5217\u8868\u300C${name}\u300D`);
-        else if (r.skipped > 0) bits.push(`\u300A${shortTitle(ep.title)}\u300B\u5DF2\u5728\u64AD\u653E\u5217\u8868\u300C${name}\u300D\u4E2D`);
-        else bits.push(`\u672A\u80FD\u52A0\u5165\u64AD\u653E\u5217\u8868\u300C${name}\u300D`);
+        if (r.added > 0) bits.push(`\u5DF2\u5C06\u300A${shortTitle(ep.title)}\u300B\u52A0\u5165\u300C\u64AD\u5BA2\u300D\u5217\u8868\u672B\u5C3E`);
+        else if (r.skipped > 0) bits.push(`\u300A${shortTitle(ep.title)}\u300B\u5DF2\u7ECF\u5728\u300C\u64AD\u5BA2\u300D\u5217\u8868\u91CC`);
+        else bits.push("\u672A\u80FD\u52A0\u5165\u300C\u64AD\u5BA2\u300D\u5217\u8868");
         notify(bits.join(""), r.added > 0 ? "ok" : "warn");
       }
       await reloadQueueIfCurrent(gen);
@@ -1682,7 +1968,7 @@
     } else if (noDevice) {
       body = `<p>\u300C\u667A\u80FD\u97F3\u7BB1\u300D\u63D2\u4EF6\u91CC\u8FD8\u6CA1\u8BFB\u5230\u8BBE\u5907\u3002</p><p>\u8BF7\u6253\u5F00\u63D2\u4EF6\u9875\uFF0C\u767B\u5F55\u5C0F\u7C73\u8D26\u53F7\uFF1B\u8BBE\u5907\u51FA\u73B0\u5728\u5217\u8868\u540E\uFF0C\u70B9\u4E00\u4E0B\u9009\u4E2D\u5B83\u3002</p>` + (errorText ? `<p class="muted">${escapeHtml(errorText)}</p>` : "");
     } else {
-      body = `<p>\u4E00\u952E\u6295\u653E\u901A\u8FC7\u300C\u667A\u80FD\u97F3\u7BB1\u300D\u63D2\u4EF6\uFF08entryPath <code>miot</code>\uFF09\u628A\u5355\u96C6 URL \u63A8\u7ED9\u97F3\u7BB1\u3002</p><p class="muted">\u8BF7\u5148\u5728 Songloft \u7684\u63D2\u4EF6\u5E02\u573A\u5B89\u88C5\uFF0C\u5E76\u786E\u8BA4\u8BE5\u63D2\u4EF6\u5DF2\u542F\u7528\u3002</p>` + (errorText ? `<p class="muted">${escapeHtml(errorText)}</p>` : "");
+      body = `<p>\u6295\u653E\u901A\u8FC7\u300C\u667A\u80FD\u97F3\u7BB1\u300D\u63D2\u4EF6\uFF08entryPath <code>miot</code>\uFF09\u8BA9\u5C0F\u7231\u97F3\u7BB1\u64AD\u653E\u300C\u64AD\u5BA2\u300D\u6B4C\u5355\u3002</p><p class="muted">\u8BF7\u5148\u5728 Songloft \u7684\u63D2\u4EF6\u5E02\u573A\u5B89\u88C5\uFF0C\u5E76\u786E\u8BA4\u8BE5\u63D2\u4EF6\u5DF2\u542F\u7528\u3002</p>` + (errorText ? `<p class="muted">${escapeHtml(errorText)}</p>` : "");
     }
     return openModal({
       title: offline ? "\u97F3\u7BB1\u79BB\u7EBF" : noDevice ? "\u6CA1\u6709\u53EF\u7528\u8BBE\u5907" : "\u9700\u8981\u300C\u667A\u80FD\u97F3\u7BB1\u300D\u63D2\u4EF6",
@@ -1743,36 +2029,45 @@
         notify("\u6CA1\u6709\u53EF\u6295\u653E\u7684\u5355\u96C6", "warn");
         return;
       }
-      notify("\u6B63\u5728\u6295\u653E\u5230\u5C0F\u7231\u97F3\u7BB1\u2026", "muted");
-      const r = await api.castMiot(id, opts.deviceId);
-      if (r && r.ok) {
-        notify(`\u5DF2\u6295\u653E\u5230${r.deviceName ? `\u300C${r.deviceName}\u300D` : "\u5C0F\u7231\u97F3\u7BB1"}`, "ok");
+      const plan = resolveSpeakerCastPlan({
+        songId: id,
+        forceSingle: opts.forceSingle,
+        queueSongs: getData().queueSongs
+      });
+      if (!plan) {
+        notify("\u6CA1\u6709\u53EF\u6295\u653E\u7684\u5355\u96C6", "warn");
         return;
       }
-      if (r && (r.reason === "miot_unavailable" || r.reason === "miot_no_device" || r.reason === "miot_device_offline")) {
-        clearToast();
-        await castUnavailableDialog(r.reason, r.error);
-        return;
-      }
-      notify(r && r.error || "\u6295\u653E\u5931\u8D25", "err");
+      await castQueueToSpeaker({
+        deviceId: opts.deviceId,
+        songIds: plan.songIds,
+        songId: plan.songId
+      });
     } catch (e) {
       notify(String(e && e.message || e), "err");
     }
   }
   async function castQueueToSpeaker(opts = {}) {
     const data2 = getData();
-    if (!data2.queueSongs.length) {
-      notify("\u64AD\u653E\u5217\u8868\u4E3A\u7A7A\uFF0C\u5148\u6DFB\u52A0\u51E0\u96C6\u518D\u6295\u653E", "warn");
+    const songIds = (Array.isArray(opts.songIds) && opts.songIds.length ? opts.songIds : (data2.queueSongs || []).map((s) => s && s.id)).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0);
+    if (!songIds.length) {
+      notify("\u300C\u64AD\u5BA2\u300D\u5217\u8868\u4E3A\u7A7A\uFF0C\u5148\u6DFB\u52A0\u51E0\u96C6\u518D\u6295\u653E", "warn");
       return;
     }
+    const songId = Number.isFinite(Number(opts.songId)) && Number(opts.songId) > 0 ? Number(opts.songId) : songIds[0];
     try {
-      notify(`\u6B63\u5728\u628A ${data2.queueSongs.length} \u96C6\u63A8\u9001\u5230\u97F3\u7BB1\u2026`, "muted");
-      const r = await api.castMiotPlaylist(null, opts.deviceId);
+      notify("\u6B63\u5728\u628A\u8FD9\u4E00\u96C6\u79FB\u5230\u300C\u64AD\u5BA2\u300D\u7B2C\u4E00\u4F4D\u5E76\u6295\u653E\u2026", "muted");
+      const r = await api.castMiotPlaylist({
+        deviceId: opts.deviceId,
+        songIds,
+        songId
+      });
       if (r && r.ok) {
         notify(
-          `\u5DF2\u6295\u653E\u5230${r.deviceName ? `\u300C${r.deviceName}\u300D` : "\u5C0F\u7231\u97F3\u7BB1"}\uFF1A${r.count} \u96C6\u6392\u961F\u64AD\u653E`,
+          `\u5DF2\u6295\u653E\u5230${r.deviceName ? `\u300C${r.deviceName}\u300D` : "\u5C0F\u7231\u97F3\u7BB1"}\uFF1A\u4ECE\u8FD9\u4E00\u96C6\u6309\u300C\u64AD\u5BA2\u300D\u5217\u8868\u987A\u5E8F\u64AD\u653E`,
           "ok"
         );
+        await reloadQueue();
         return;
       }
       if (r && (r.reason === "miot_unavailable" || r.reason === "miot_no_device" || r.reason === "miot_device_offline")) {
@@ -1780,9 +2075,17 @@
         await castUnavailableDialog(r.reason, r.error);
         return;
       }
-      notify(r && r.error || "\u6295\u653E\u5931\u8D25", "err");
+      const orderNote = r && r.orderChanged === false ? "\u300C\u64AD\u5BA2\u300D\u5217\u8868\u987A\u5E8F\u672A\u6539\u53D8\u3002" : "\u300C\u64AD\u5BA2\u300D\u5217\u8868\u987A\u5E8F\u4F1A\u5728\u64AD\u653E\u8BF7\u6C42\u4E4B\u524D\u8C03\u6574\uFF0C\u53EF\u80FD\u5DF2\u7ECF\u6539\u6210\u4ECE\u8FD9\u4E00\u96C6\u5F00\u59CB\u3002";
+      notify(`${r && r.error || "\u6295\u653E\u5931\u8D25"} ${orderNote}`.trim(), "err");
+      if (r && r.orderChanged !== false) reloadQueue().catch(() => {
+      });
     } catch (e) {
-      notify(String(e && e.message || e), "err");
+      notify(
+        `\u6295\u653E\u5931\u8D25\uFF1A${String(e && e.message || e)}\u3002\u300C\u64AD\u5BA2\u300D\u5217\u8868\u987A\u5E8F\u53EF\u80FD\u5728\u8BF7\u6C42\u524D\u5DF2\u8C03\u6574\u3002`,
+        "err"
+      );
+      reloadQueue().catch(() => {
+      });
     }
   }
   var queueWrites = createQueueWriteTracker();
@@ -1814,6 +2117,15 @@
       notifyQueueViews();
     } catch (_) {
     }
+  }
+  function applyQueueOrderLocally(ids, episode) {
+    const data2 = getData();
+    const songs = data2.queueSongs || [];
+    const next = pinQueueSongsLocally(songs, ids, episode);
+    patch({ queueSongs: next, queueMeta: data2.queueMeta });
+    repaintQueueButtonsNow();
+    notifyQueueViews();
+    return next;
   }
   function rollbackQueue(before, gen) {
     const plan = rollbackPlan({ before, token: gen, tracker: queueWrites });
@@ -1854,12 +2166,12 @@
   async function clearQueue() {
     const data2 = getData();
     if (!data2.queueSongs.length) {
-      notify("\u64AD\u653E\u5217\u8868\u5DF2\u7A7A", "muted");
+      notify("\u300C\u64AD\u5BA2\u300D\u5217\u8868\u5DF2\u7A7A", "muted");
       return;
     }
     const ok = await uiConfirm({
-      title: "\u6E05\u7A7A\u64AD\u653E\u5217\u8868",
-      message: `\u5C06\u6E05\u7A7A\u56FA\u5B9A\u6B4C\u5355\u300C${data2.queueMeta ? data2.queueMeta.playlistName : "\u64AD\u5BA2"}\u300D\u4E2D\u7684 ${data2.queueSongs.length} \u9996\uFF0C\u4E0D\u4F1A\u5220\u9664\u8FDC\u7A0B\u97F3\u9891\u6587\u4EF6\u3002`,
+      title: "\u6E05\u7A7A\u300C\u64AD\u5BA2\u300D\u5217\u8868",
+      message: `\u5C06\u6E05\u7A7A\u300C\u64AD\u5BA2\u300D\u5217\u8868\u4E2D\u7684 ${data2.queueSongs.length} \u9996\uFF0C\u4E0D\u4F1A\u5220\u9664\u8FDC\u7A0B\u97F3\u9891\u6587\u4EF6\uFF0C\u4E5F\u4E0D\u4F1A\u5220\u9664\u8FD9\u5F20\u6B4C\u5355\u3002`,
       okText: "\u6E05\u7A7A",
       danger: true
     });
@@ -1918,7 +2230,7 @@
   async function replaceQueueAndPlay2() {
     const data2 = getData();
     if (!data2.queueSongs.length) {
-      notify("\u64AD\u653E\u5217\u8868\u4E3A\u7A7A", "warn");
+      notify("\u300C\u64AD\u5BA2\u300D\u5217\u8868\u4E3A\u7A7A", "warn");
       return;
     }
     if (!hasSetQueue()) {
@@ -1932,14 +2244,21 @@
     });
     if (!ok) return;
     try {
-      await ensureSequentialPlayMode();
+      const modeOk = await ensureSequentialPlayMode();
+      if (modeOk === false) return;
       const { ids } = queueIdsForStart(getData().queueSongs, null);
       if (!ids.length) {
-        notify("\u64AD\u653E\u5217\u8868\u91CC\u8FD8\u6CA1\u6709\u53EF\u64AD\u653E\u7684\u5355\u96C6", "warn");
+        notify("\u300C\u64AD\u5BA2\u300D\u5217\u8868\u91CC\u8FD8\u6CA1\u6709\u53EF\u64AD\u653E\u7684\u5355\u96C6", "warn");
         return;
       }
-      const playlistId = data2.queueMeta && data2.queueMeta.playlistId;
-      await replaceQueueAndPlay(ids, 0, { sourcePlaylistId: playlistId });
+      const meta = getData().queueMeta;
+      await replaceQueueAndPlay(ids, 0, {
+        sourcePlaylistId: meta ? meta.playlistId : void 0
+      });
+      try {
+        await setPlayMode("order");
+      } catch (_) {
+      }
       const first = (getData().queueSongs || []).find((s) => episodeSongId(s) === ids[0]) || getData().queueSongs[0];
       notify(`\u6B63\u5728\u64AD\u653E\u300C${first && first.title || "\u5F53\u524D\u5355\u96C6"}\u300D`, "ok");
     } catch (e) {
@@ -1970,6 +2289,231 @@
     } finally {
       queueWrites.end();
     }
+  }
+
+  // ui/lib/skeletonGate.js
+  var SKELETON_DELAY_MS = 200;
+  function episodeSkeletonHtml(rows = 6) {
+    const n = Math.max(1, Math.min(12, Number(rows) || 6));
+    let html = "";
+    for (let i = 0; i < n; i += 1) {
+      html += `<div class="ep-skel" aria-hidden="true"><div class="ep-skel__cover"></div><div class="ep-skel__body"><div class="ep-skel__line"></div><div class="ep-skel__line ep-skel__line--short"></div></div></div>`;
+    }
+    return html;
+  }
+  function createSkeletonGate(opts) {
+    const delayMs = typeof opts.delayMs === "number" && opts.delayMs >= 0 ? opts.delayMs : SKELETON_DELAY_MS;
+    const hasContent = opts.hasContent;
+    const show = opts.show;
+    const schedule = opts.setTimeout || setTimeout;
+    const cancel = opts.clearTimeout || clearTimeout;
+    let timer2 = null;
+    let shown = false;
+    let stopped = false;
+    function start() {
+      stopped = false;
+      shown = false;
+      if (typeof hasContent === "function" && hasContent()) return;
+      if (timer2 != null) cancel(timer2);
+      timer2 = schedule(() => {
+        timer2 = null;
+        if (stopped) return;
+        if (typeof hasContent === "function" && hasContent()) return;
+        shown = true;
+        if (typeof show === "function") show();
+      }, delayMs);
+    }
+    function stop() {
+      stopped = true;
+      if (timer2 != null) {
+        cancel(timer2);
+        timer2 = null;
+      }
+    }
+    return {
+      start,
+      stop,
+      wasShown: () => shown,
+      isPending: () => timer2 != null
+    };
+  }
+
+  // ui/lib/uiCache.js
+  var UI_CACHE_KEY = "songloft.podcast.uiCache.v1";
+  var FEED_CACHE_TTL_MS = 6 * 60 * 60 * 1e3;
+  var UI_CACHE_LIST_CAPS = {
+    recent: 80,
+    history: 120,
+    favorites: 120,
+    subs: 200,
+    queueSongs: 400
+  };
+  var LIST_KEYS = ["recent", "history", "favorites", "subs", "queueSongs"];
+  var EMPTY = () => ({
+    version: 1,
+    savedAt: 0,
+    feedSyncedAt: 0,
+    activeTab: "recent",
+    queueOpen: false,
+    scrolls: {},
+    recent: [],
+    history: [],
+    favorites: [],
+    subs: [],
+    queueSongs: [],
+    queueMeta: null
+  });
+  function storage() {
+    try {
+      if (typeof localStorage === "undefined") return null;
+      return localStorage;
+    } catch (_) {
+      return null;
+    }
+  }
+  function slimCacheItem(item) {
+    if (!item || typeof item !== "object") return item;
+    if (!Object.prototype.hasOwnProperty.call(item, "showNote")) return item;
+    const { showNote, ...rest } = item;
+    if (showNote == null) return rest;
+    return { ...rest, hasShowNote: true };
+  }
+  function slimCacheList(list, cap) {
+    if (!Array.isArray(list)) return [];
+    const limit = typeof cap === "number" && cap > 0 ? cap : list.length;
+    return list.slice(0, limit).map(slimCacheItem);
+  }
+  function mergeListsForPersist(partial, previous) {
+    const prev = previous && typeof previous === "object" ? previous : {};
+    const src = partial && typeof partial === "object" ? partial : {};
+    const out = { ...src };
+    for (const key of LIST_KEYS) {
+      const next = src[key];
+      const old = prev[key];
+      if (Array.isArray(next) && next.length === 0 && Array.isArray(old) && old.length > 0) {
+        out[key] = old;
+      }
+    }
+    if ((src.queueMeta == null || src.queueMeta === void 0) && prev.queueMeta != null) {
+      out.queueMeta = prev.queueMeta;
+    }
+    return out;
+  }
+  function retainNonEmptyLists(current, previous) {
+    const cur = current && typeof current === "object" ? current : {};
+    const prev = previous && typeof previous === "object" ? previous : {};
+    const patch2 = {};
+    let changed = false;
+    for (const key of LIST_KEYS) {
+      const now = cur[key];
+      const old = prev[key];
+      if (Array.isArray(now) && now.length === 0 && Array.isArray(old) && old.length > 0) {
+        patch2[key] = old;
+        changed = true;
+      }
+    }
+    if ((cur.queueMeta == null || cur.queueMeta === void 0) && prev.queueMeta != null && Array.isArray(prev.queueSongs) && prev.queueSongs.length > 0) {
+      patch2.queueMeta = prev.queueMeta;
+      changed = true;
+    }
+    return { patch: patch2, changed };
+  }
+  function hasValidListCache(cache) {
+    if (!cache || typeof cache !== "object") return false;
+    const lists = [cache.recent, cache.history, cache.favorites, cache.subs, cache.queueSongs];
+    return lists.some((list) => Array.isArray(list) && list.length > 0);
+  }
+  function needsInitialFeedRefresh(cache) {
+    return !hasValidListCache(cache);
+  }
+  function shouldBackgroundFeedRefresh(cache, now = Date.now(), ttlMs = FEED_CACHE_TTL_MS) {
+    if (!hasValidListCache(cache)) return false;
+    const synced = Number(cache.feedSyncedAt) || 0;
+    if (!synced) return true;
+    return now - synced >= ttlMs;
+  }
+  function isScheduleFeedFresh(lastSuccessAt, intervalHours = 6, now = Date.now()) {
+    const last = Number(lastSuccessAt);
+    if (!Number.isFinite(last) || last <= 0) return false;
+    let hours = Number(intervalHours);
+    if (!Number.isFinite(hours) || hours <= 0) hours = 6;
+    if (hours !== 6 && hours !== 12 && hours !== 24) hours = 6;
+    return now - last < hours * 60 * 60 * 1e3;
+  }
+  function shouldBootFeedRefresh(cache, schedule = null, now = Date.now()) {
+    if (schedule && isScheduleFeedFresh(schedule.lastSuccessAt, schedule.intervalHours, now)) {
+      return false;
+    }
+    if (needsInitialFeedRefresh(cache)) return true;
+    return shouldBackgroundFeedRefresh(cache, now);
+  }
+  function loadUiCache(store = storage()) {
+    if (!store) return null;
+    try {
+      const raw = store.getItem(UI_CACHE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") return null;
+      return { ...EMPTY(), ...parsed, version: 1 };
+    } catch (_) {
+      return null;
+    }
+  }
+  function saveUiCache(partial, store = storage(), now = Date.now()) {
+    if (!store) return null;
+    const prev = loadUiCache(store) || EMPTY();
+    const merged = mergeListsForPersist(partial || {}, prev);
+    const next = {
+      ...prev,
+      ...merged,
+      version: 1,
+      savedAt: now,
+      recent: slimCacheList(merged.recent != null ? merged.recent : prev.recent, UI_CACHE_LIST_CAPS.recent),
+      history: slimCacheList(merged.history != null ? merged.history : prev.history, UI_CACHE_LIST_CAPS.history),
+      favorites: slimCacheList(
+        merged.favorites != null ? merged.favorites : prev.favorites,
+        UI_CACHE_LIST_CAPS.favorites
+      ),
+      subs: slimCacheList(merged.subs != null ? merged.subs : prev.subs, UI_CACHE_LIST_CAPS.subs),
+      queueSongs: slimCacheList(
+        merged.queueSongs != null ? merged.queueSongs : prev.queueSongs,
+        UI_CACHE_LIST_CAPS.queueSongs
+      )
+    };
+    try {
+      store.setItem(UI_CACHE_KEY, JSON.stringify(next));
+      return next;
+    } catch (_) {
+      try {
+        const tight = {
+          ...next,
+          history: slimCacheList(next.history, 40),
+          favorites: slimCacheList(next.favorites, 40),
+          queueSongs: slimCacheList(next.queueSongs, 80)
+        };
+        store.setItem(UI_CACHE_KEY, JSON.stringify(tight));
+        return tight;
+      } catch (_2) {
+        return null;
+      }
+    }
+  }
+  function markFeedSynced(at = Date.now(), store = storage()) {
+    return saveUiCache({ feedSyncedAt: at }, store, at);
+  }
+  function cacheFromStoreData(data2, chrome = {}) {
+    const d = data2 || {};
+    return {
+      recent: Array.isArray(d.recent) ? d.recent : [],
+      history: Array.isArray(d.history) ? d.history : [],
+      favorites: Array.isArray(d.favorites) ? d.favorites : [],
+      subs: Array.isArray(d.subs) ? d.subs : [],
+      queueSongs: Array.isArray(d.queueSongs) ? d.queueSongs : [],
+      queueMeta: d.queueMeta || null,
+      activeTab: chrome.activeTab || "recent",
+      queueOpen: !!chrome.queueOpen,
+      scrolls: chrome.scrolls && typeof chrome.scrolls === "object" ? chrome.scrolls : {}
+    };
   }
 
   // ui/lib/format.js
@@ -2024,301 +2568,6 @@
     return String(haystack || "").toLowerCase().includes(q);
   }
 
-  // ui/views/player-bar.js
-  var seeking = false;
-  var uiTickTimer = null;
-  var lastHostSyncAt = 0;
-  var scrubCommitToken = 0;
-  var coverCache = /* @__PURE__ */ new Map();
-  function rememberCover(songId, url) {
-    const abs = absoluteCoverUrl(url);
-    if (songId == null || !abs) return;
-    const key = Number(songId);
-    if (!Number.isFinite(key)) return;
-    if (coverCache.get(key) !== abs) coverCache.set(key, abs);
-  }
-  function primeCoverCache() {
-    const data2 = getData();
-    for (const s of data2.queueSongs || []) rememberCover(s.id, s.coverUrl || s.cover_url);
-    for (const ep of data2.recent || []) rememberCover(ep.songId, ep.coverUrl);
-    for (const ep of data2.favorites || []) rememberCover(ep.songId, ep.coverUrl);
-    for (const ep of data2.episodes || []) rememberCover(ep.songId, ep.coverUrl);
-  }
-  function resolveCover(cur) {
-    if (!cur) return "";
-    const songId = cur.songId != null ? Number(cur.songId) : null;
-    if (songId != null && coverCache.has(songId)) return coverCache.get(songId);
-    const fromCurrent = absoluteCoverUrl(cur.coverUrl);
-    if (fromCurrent) {
-      if (songId != null) coverCache.set(songId, fromCurrent);
-      return fromCurrent;
-    }
-    const song = (getData().queueSongs || []).find((x) => x.id === songId);
-    const fromQueue = absoluteCoverUrl(song && (song.coverUrl || song.cover_url));
-    if (fromQueue) {
-      if (songId != null) coverCache.set(songId, fromQueue);
-      return fromQueue;
-    }
-    return "";
-  }
-  var coverSongId = null;
-  var coverRetryTimer = null;
-  function placeholderCover() {
-    const el2 = document.createElement("div");
-    el2.id = "playerCover";
-    el2.className = "player__cover placeholder";
-    el2.textContent = "";
-    return el2;
-  }
-  function setCover(url, songId) {
-    const abs = absoluteCoverUrl(url);
-    const sameSong = songId != null && Number(songId) === coverSongId;
-    if (songId != null) coverSongId = Number(songId);
-    if (!abs) {
-      if (sameSong) return;
-      const existing2 = $("playerCover");
-      if (existing2 && existing2.tagName === "IMG") existing2.replaceWith(placeholderCover());
-      return;
-    }
-    const existing = $("playerCover");
-    if (existing && existing.tagName === "IMG") {
-      if (existing.getAttribute("src") !== abs) {
-        mountCover(abs, existing);
-      }
-      return;
-    }
-    mountCover(abs, existing);
-  }
-  function mountCover(abs, existing) {
-    const img = document.createElement("img");
-    img.id = "playerCover";
-    img.className = "player__cover";
-    img.alt = "";
-    img.decoding = "async";
-    img.loading = "eager";
-    img.referrerPolicy = "no-referrer";
-    img.onerror = () => onCoverError(abs, img);
-    img.src = abs;
-    if (existing) existing.replaceWith(img);
-  }
-  function onCoverError(abs, img) {
-    if (!img || !img.isConnected) return;
-    img.replaceWith(placeholderCover());
-    if (coverRetryTimer) clearTimeout(coverRetryTimer);
-    coverRetryTimer = setTimeout(() => {
-      if (coverSongId == null) return;
-      const current = get().current;
-      if (!current || Number(current.songId) !== coverSongId) return;
-      const retryUrl = coverCache.get(coverSongId);
-      if (!retryUrl) return;
-      const node = $("playerCover");
-      if (node && node.tagName === "IMG") return;
-      mountCover(retryUrl, node);
-    }, 2500);
-  }
-  function resetCover() {
-    coverSongId = null;
-    if (coverRetryTimer) {
-      clearTimeout(coverRetryTimer);
-      coverRetryTimer = null;
-    }
-    const existing = $("playerCover");
-    if (existing && existing.tagName === "IMG") existing.replaceWith(placeholderCover());
-  }
-  function bindCoverCache() {
-    subscribe(() => primeCoverCache());
-    primeCoverCache();
-  }
-  function setProgressUi(pos, dur) {
-    const posEl = $("playerPos");
-    const durEl = $("playerDur");
-    const seek2 = $("playerSeek");
-    const line = $("playerLine");
-    const ratio = dur > 0 ? Math.min(1, Math.max(0, pos / dur)) : 0;
-    const pct = `${(ratio * 100).toFixed(2)}%`;
-    if (line) line.style.setProperty("--p", pct);
-    if (posEl) posEl.textContent = fmtSec(pos);
-    if (durEl) durEl.textContent = dur > 0 ? fmtSec(dur) : "\u2014";
-    if (seek2) {
-      seek2.disabled = !(dur > 0);
-      if (!seeking) seek2.value = String(Math.round(ratio * 1e3));
-    }
-  }
-  function ensureUiTick(phase) {
-    if (phase === "playing") {
-      if (uiTickTimer != null) return;
-      uiTickTimer = setInterval(async () => {
-        if (seeking) return;
-        const snap = get();
-        if (snap.phase !== "playing") {
-          clearInterval(uiTickTimer);
-          uiTickTimer = null;
-          return;
-        }
-        const now = Date.now();
-        if (now - lastHostSyncAt > 2e3) {
-          lastHostSyncAt = now;
-          try {
-            applyHostState(await getState());
-            return;
-          } catch (_) {
-          }
-        }
-        const dur = typeof snap.durationSec === "number" && snap.durationSec > 0 ? snap.durationSec : 0;
-        setProgressUi(livePositionSec(snap), dur);
-      }, 250);
-      return;
-    }
-    if (uiTickTimer != null) {
-      clearInterval(uiTickTimer);
-      uiTickTimer = null;
-    }
-  }
-  function renderPlayerBar(snap) {
-    const bar = $("playerBar");
-    if (!bar) return;
-    const cur = snap.current;
-    const titleEl = $("playerTitle");
-    const subEl = $("playerSub");
-    const playBtn = $("btnPlayPause");
-    const dur = typeof snap.durationSec === "number" && snap.durationSec > 0 ? snap.durationSec : 0;
-    const pos = seeking ? (() => {
-      const seek2 = $("playerSeek");
-      return dur > 0 && seek2 ? Number(seek2.value) / 1e3 * dur : livePositionSec(snap);
-    })() : livePositionSec(snap);
-    if (!cur) {
-      bar.classList.add("is-empty");
-      titleEl.textContent = "\u5C1A\u672A\u64AD\u653E";
-      subEl.textContent = "";
-      seeking = false;
-      setProgressUi(0, 0);
-      ensureUiTick("idle");
-      playBtn.innerHTML = icon("play", 20);
-      playBtn.title = "\u64AD\u653E";
-      resetCover();
-      $("btnPlayerCast").disabled = true;
-      return;
-    }
-    bar.classList.remove("is-empty");
-    titleEl.textContent = cur.title || "\u672A\u547D\u540D";
-    const bits = [];
-    if (cur.showTitle) bits.push(cur.showTitle);
-    if (snap.error) bits.push(snap.error);
-    else if (snap.hostHint) bits.push(snap.hostHint);
-    subEl.textContent = bits.join(" \xB7 ");
-    setProgressUi(pos, dur);
-    ensureUiTick(snap.phase);
-    if (snap.phase === "playing") {
-      playBtn.innerHTML = icon("pause", 20);
-      playBtn.title = "\u6682\u505C";
-    } else {
-      playBtn.innerHTML = icon("play", 20);
-      playBtn.title = snap.phase === "paused" || snap.phase === "ended" ? "\u7EE7\u7EED" : "\u64AD\u653E";
-    }
-    const song = getData().queueSongs.find((x) => x.id === cur.songId);
-    setCover(resolveCover(cur) || song && (song.coverUrl || song.cover_url), cur.songId);
-    $("btnPlayerCast").disabled = cur.songId == null;
-  }
-  function bindPlayerBar() {
-    const seek2 = $("playerSeek");
-    if (seek2) {
-      const endScrub = () => {
-        seeking = false;
-      };
-      const commit = async () => {
-        const token = ++scrubCommitToken;
-        const snap = get();
-        const dur = snap.durationSec;
-        if (!(dur > 0)) {
-          endScrub();
-          return;
-        }
-        const next = Number(seek2.value) / 1e3 * dur;
-        setPhase(snap.phase === "playing" ? "playing" : snap.phase || "paused", {
-          positionSec: next
-        });
-        endScrub();
-        try {
-          await seek(next);
-          if (token !== scrubCommitToken) return;
-          applyHostState(await getState());
-          await flushProgress({ seek: true });
-        } catch (e) {
-          if (token !== scrubCommitToken) return;
-          notify(String(e), "err");
-          try {
-            applyHostState(await getState());
-          } catch (_) {
-          }
-        }
-      };
-      seek2.addEventListener("pointerdown", (ev) => {
-        seeking = true;
-        try {
-          seek2.setPointerCapture(ev.pointerId);
-        } catch (_) {
-        }
-      });
-      seek2.addEventListener("pointerup", commit);
-      seek2.addEventListener("pointercancel", endScrub);
-      seek2.addEventListener("lostpointercapture", () => {
-        if (seeking) endScrub();
-      });
-      seek2.addEventListener("change", commit);
-      seek2.addEventListener("input", () => {
-        seeking = true;
-        const snap = get();
-        const dur = typeof snap.durationSec === "number" && snap.durationSec > 0 ? snap.durationSec : 0;
-        if (!(dur > 0)) return;
-        const pos = Number(seek2.value) / 1e3 * dur;
-        setProgressUi(pos, dur);
-      });
-    }
-    $("btnPlayPause").addEventListener("click", () => togglePlayPause());
-    $("btnSeekBack").addEventListener("click", async () => {
-      const snap = get();
-      try {
-        await seek(Math.max(0, (snap.positionSec || 0) - 15));
-        applyHostState(await getState());
-        await flushProgress({ seek: true });
-      } catch (e) {
-        notify(String(e), "err");
-      }
-    });
-    $("btnSeekFwd").addEventListener("click", async () => {
-      const snap = get();
-      const dur = snap.durationSec;
-      const next = dur && dur > 0 ? Math.min(dur, (snap.positionSec || 0) + 15) : (snap.positionSec || 0) + 15;
-      try {
-        await seek(next);
-        applyHostState(await getState());
-        await flushProgress({ seek: true });
-      } catch (e) {
-        notify(String(e), "err");
-      }
-    });
-    $("btnPlayerCast").addEventListener("click", () => {
-      const cur = get().current;
-      if (!cur || cur.songId == null) {
-        notify("\u6CA1\u6709\u6B63\u5728\u64AD\u653E\u7684\u5355\u96C6", "warn");
-        return;
-      }
-      castToSpeaker(cur.songId);
-    });
-    const meta = $("playerMeta");
-    if (meta) {
-      meta.addEventListener("click", () => {
-        const bar = $("playerBar");
-        if (bar.classList.contains("is-collapsed")) bar.classList.remove("is-collapsed");
-        bar.classList.toggle("is-expanded");
-        meta.setAttribute(
-          "title",
-          bar.classList.contains("is-expanded") ? "\u6536\u8D77\u64AD\u653E\u63A7\u5236" : "\u5C55\u5F00\u64AD\u653E\u63A7\u5236"
-        );
-      });
-    }
-  }
-
   // ui/lib/rows.js
   function progressBadgeHtml(prog, durationSec) {
     const dur = prog && prog.durationSec || durationSec;
@@ -2337,7 +2586,7 @@
     const klass = cls || "ep-cover";
     const abs = absoluteCoverUrl(url);
     if (abs) {
-      return `<img class="${klass}" src="${escapeHtml(abs)}" alt="" loading="lazy" data-cover />`;
+      return `<img class="${klass}" src="${escapeHtml(abs)}" alt="" loading="lazy" referrerpolicy="no-referrer" data-cover />`;
     }
     const letter = String(title || "?").trim().charAt(0).toUpperCase() || "?";
     return `<div class="cover-ph ${klass === "ep-cover" ? "" : klass}" style="background:${colorFromString(title || "")}">${escapeHtml(letter)}</div>`;
@@ -2380,6 +2629,7 @@
     const playIcon = isCurrent && snap.phase === "playing" ? "pause" : "play";
     const lead = opts.leadHtml || "";
     const pending = !!opts.pending;
+    const fromWaitlist = !!opts.fromWaitlist;
     const headGrid = lead ? "ep-head q-head" : "ep-head";
     const channelAttr = opts.channelLink ? `data-channel-tap data-idx="${idx}"` : "";
     const art = opts.coverHtml || coverHtml(ep.coverUrl, ep.title || ep.showTitle);
@@ -2388,7 +2638,7 @@
     const actions = (opts.actions || []).map(
       (a) => `<button type="button" class="icon-btn ${a.cls || ""}" data-act="${a.act}" data-idx="${idx}" title="${escapeHtml(a.title)}" ${a.attrs || ""}>${icon(a.iconName, 17)}</button>`
     ).join("");
-    return `<div class="ep-row${isCurrent ? " is-current" : ""}${pending ? " is-pending" : ""}${opts.extraClass ? " " + opts.extraClass : ""}" data-row data-idx="${idx}" ${pending ? 'aria-busy="true" ' : ""}${rowDataset(ep)}><div class="${headGrid}">` + lead + cover + `<div><button type="button" class="ep-title--tap" data-title-tap data-idx="${idx}" title="\u67E5\u770B\u8BE6\u60C5">${escapeHtml(ep.title || "\u672A\u547D\u540D")}</button><div class="meta-line">` + showName + (pending ? `<span class="q-pending">\u6B63\u5728\u52A0\u5165\u2026</span>` : `<span data-now-badge ${isCurrent && label ? "" : "hidden"}>${escapeHtml(isCurrent ? label : "")}</span><span data-prog-slot>${progressBadgeHtml(prog, ep.durationSec)}</span>` + (showDate ? `<span class="hide-sm">${escapeHtml(fmtTime(dateMs))}</span>` : "")) + `</div></div></div><div class="actions-row"><button type="button" class="icon-btn icon-btn--play" data-play-btn data-idx="${idx}" title="${playButtonLabel({ isCurrent, phase: snap.phase, pending })}" aria-label="${playButtonLabel({ isCurrent, phase: snap.phase, pending })}"${pending ? " disabled" : ""}>${pending ? '<span class="q-spinner" aria-hidden="true"></span>' : icon(playIcon, 17)}</button>` + actions + (opts.moreHtml || "") + `</div></div>`;
+    return `<div class="ep-row${isCurrent ? " is-current" : ""}${pending ? " is-pending" : ""}${opts.extraClass ? " " + opts.extraClass : ""}" data-row data-idx="${idx}" ${pending ? 'aria-busy="true" ' : ""}${fromWaitlist ? 'data-from-waitlist="1" ' : ""}${rowDataset(ep)}><div class="${headGrid}">` + lead + cover + `<div><button type="button" class="ep-title--tap" data-title-tap data-idx="${idx}" title="\u67E5\u770B\u8BE6\u60C5">${escapeHtml(ep.title || "\u672A\u547D\u540D")}</button><div class="meta-line">` + showName + (pending ? `<span class="q-pending">\u6B63\u5728\u52A0\u5165\u2026</span>` : `<span data-now-badge ${isCurrent && label ? "" : "hidden"}>${escapeHtml(isCurrent ? label : "")}</span><span data-prog-slot>${progressBadgeHtml(prog, ep.durationSec)}</span>` + (showDate ? `<span class="hide-sm">${escapeHtml(fmtTime(dateMs))}</span>` : "")) + `</div></div></div><div class="actions-row"><button type="button" class="icon-btn icon-btn--play" data-play-btn data-idx="${idx}" title="${playButtonLabel({ isCurrent, phase: snap.phase, pending, fromWaitlist })}" aria-label="${playButtonLabel({ isCurrent, phase: snap.phase, pending, fromWaitlist })}"${pending ? " disabled" : ""}>${pending ? '<span class="q-spinner" aria-hidden="true"></span>' : icon(playIcon, 17)}</button>` + actions + (opts.moreHtml || "") + `</div></div>`;
   }
   function moreMenuHtml(items, wrapKey) {
     const body = items.map((it) => {
@@ -2422,7 +2672,8 @@
       if (playBtn) {
         const iconName = isCurrent && current.phase === "playing" ? "pause" : "play";
         const pending = row.classList.contains("is-pending");
-        const label2 = playButtonLabel({ isCurrent, phase: current.phase, pending });
+        const fromWaitlist = row.hasAttribute("data-from-waitlist");
+        const label2 = playButtonLabel({ isCurrent, phase: current.phase, pending, fromWaitlist });
         if (!pending) playBtn.innerHTML = icon(iconName, 17);
         playBtn.title = label2;
         playBtn.setAttribute("aria-label", label2);
@@ -2434,6 +2685,231 @@
       const prog = isCurrent ? liveProgressFor({ id: songId, progress: base, duration: dur }, current) : base;
       if (prog || dur) slot.innerHTML = progressBadgeHtml(prog, dur);
     });
+  }
+
+  // ui/lib/feedRefresh.js
+  var fullInFlight = null;
+  var oneInFlight = null;
+  var remoteBusy = false;
+  var listeners3 = /* @__PURE__ */ new Set();
+  var REFRESH_BUSY_TOAST = "\u6B63\u5728\u5237\u65B0\uFF0C\u8BF7\u7A0D\u5019\u3002";
+  var REFRESH_STILL_RUNNING_TOAST = "\u5237\u65B0\u4ECD\u5728\u8FDB\u884C\uFF0C\u7A0D\u540E\u4E0B\u62C9\u67E5\u770B\u3002";
+  var REFRESH_HINT_TEXT = "\u6B63\u5728\u5237\u65B0\u2026";
+  var REFRESH_MENU_BUSY_LABEL = "\u6B63\u5728\u5237\u65B0\u2026";
+  var REFRESH_MENU_IDLE_LABEL = "\u5237\u65B0";
+  function isFeedRefreshing() {
+    return !!(fullInFlight || oneInFlight || remoteBusy);
+  }
+  function onFeedRefreshState(fn) {
+    if (typeof fn !== "function") return () => {
+    };
+    listeners3.add(fn);
+    try {
+      fn(isFeedRefreshing());
+    } catch (_) {
+    }
+    return () => listeners3.delete(fn);
+  }
+  function emit2() {
+    const busy = isFeedRefreshing();
+    for (const fn of listeners3) {
+      try {
+        fn(busy);
+      } catch (_) {
+      }
+    }
+  }
+  function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+  function isSkippedBusy(errOrResult) {
+    if (errOrResult == null) return false;
+    if (typeof errOrResult === "string") return /skipped_busy/i.test(errOrResult);
+    if (typeof errOrResult !== "object") return /skipped_busy/i.test(String(errOrResult));
+    if (errOrResult.skipped === true) return true;
+    if (errOrResult.error === "skipped_busy" || errOrResult.reason === "skipped_busy") return true;
+    const msg = String(errOrResult.message || errOrResult.error || errOrResult.reason || "");
+    return /skipped_busy/i.test(msg);
+  }
+  function humanizeRefreshFailure(errOrResult, fallback = "\u5237\u65B0\u5931\u8D25") {
+    if (isSkippedBusy(errOrResult)) return REFRESH_BUSY_TOAST;
+    if (errOrResult == null) return fallback;
+    if (typeof errOrResult === "string") {
+      const s = errOrResult.replace(/^Error:\s*/i, "").trim();
+      if (!s || /skipped_busy/i.test(s)) return fallback;
+      return s;
+    }
+    const raw = String(
+      errOrResult.message || errOrResult.error || errOrResult.reason || ""
+    ).replace(/^Error:\s*/i, "").trim();
+    if (!raw || /skipped_busy/i.test(raw)) return fallback;
+    return raw;
+  }
+  function wrapRefreshCall(promiseFactory) {
+    return (async () => {
+      try {
+        return await promiseFactory();
+      } catch (e) {
+        if (isSkippedBusy(e)) return { ok: false, skipped: true, error: "skipped_busy" };
+        throw e;
+      }
+    })();
+  }
+  async function waitUntilFeedRefreshIdle(api2, opts = {}) {
+    const pollMs = typeof opts.pollMs === "number" && opts.pollMs > 0 ? opts.pollMs : 350;
+    const timeoutMs = typeof opts.timeoutMs === "number" && opts.timeoutMs > 0 ? opts.timeoutMs : 18e4;
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      let status = null;
+      try {
+        status = await api2.status();
+      } catch (_) {
+        status = null;
+      }
+      const busy = !!(status && status.refreshBusy === true);
+      if (busy !== remoteBusy) {
+        remoteBusy = busy;
+        emit2();
+      }
+      if (!busy) return { timedOut: false };
+      await delay(pollMs);
+    }
+    if (remoteBusy) {
+      remoteBusy = false;
+      emit2();
+    }
+    return { timedOut: true };
+  }
+  async function trackRemoteRefreshBusy(api2, opts = {}) {
+    remoteBusy = true;
+    emit2();
+    try {
+      return await waitUntilFeedRefreshIdle(api2, opts);
+    } finally {
+      remoteBusy = false;
+      emit2();
+    }
+  }
+  function runFeedRefresh(deps) {
+    if (fullInFlight || oneInFlight) return Promise.resolve({ noop: true });
+    const refreshAll = deps && deps.refreshAll;
+    const afterRefresh = deps && deps.afterRefresh;
+    if (typeof refreshAll !== "function") {
+      return Promise.reject(new Error("refreshAll required"));
+    }
+    let settle;
+    const gate = new Promise((resolve, reject) => {
+      settle = { resolve, reject };
+    });
+    fullInFlight = gate;
+    emit2();
+    (async () => {
+      try {
+        const result = await wrapRefreshCall(refreshAll);
+        if (typeof afterRefresh === "function") {
+          await afterRefresh(result);
+        }
+        settle.resolve(result);
+      } catch (e) {
+        settle.reject(e);
+      } finally {
+        fullInFlight = null;
+        emit2();
+      }
+    })();
+    return gate;
+  }
+  function runFeedRefreshOne(deps) {
+    if (fullInFlight || oneInFlight) return Promise.resolve({ noop: true });
+    const refreshOne = deps && deps.refreshOne;
+    const afterRefresh = deps && deps.afterRefresh;
+    if (typeof refreshOne !== "function") {
+      return Promise.reject(new Error("refreshOne required"));
+    }
+    let settle;
+    const gate = new Promise((resolve, reject) => {
+      settle = { resolve, reject };
+    });
+    oneInFlight = gate;
+    emit2();
+    (async () => {
+      try {
+        const result = await wrapRefreshCall(refreshOne);
+        if (typeof afterRefresh === "function") {
+          await afterRefresh(result);
+        }
+        settle.resolve(result);
+      } catch (e) {
+        settle.reject(e);
+      } finally {
+        oneInFlight = null;
+        emit2();
+      }
+    })();
+    return gate;
+  }
+  function readRefreshIconSize(btn) {
+    const slot = btn.querySelector && btn.querySelector("[data-size], .ico, .q-spinner");
+    if (slot) {
+      const raw = typeof slot.getAttribute === "function" && slot.getAttribute("data-size") || typeof slot.getAttribute === "function" && slot.getAttribute("style") || "";
+      const fromData = Number(raw);
+      if (Number.isFinite(fromData) && fromData > 0) return fromData;
+      const m = /width:\s*(\d+)/.exec(String(raw));
+      if (m) return Number(m[1]) || 16;
+    }
+    return 16;
+  }
+  function applyRefreshButtonBusy(btn, busy) {
+    if (!btn) return;
+    if (busy) {
+      btn.setAttribute("aria-busy", "true");
+      if (btn.classList.contains("is-refreshing") && btn.querySelector && btn.querySelector(".q-spinner")) {
+        return;
+      }
+      btn.classList.add("is-refreshing");
+      if (btn.dataset && btn.dataset.refreshIdleHtml == null) {
+        btn.dataset.refreshIdleHtml = btn.innerHTML || "";
+      }
+      const size = readRefreshIconSize(btn);
+      const spinner = `<span class="q-spinner" style="width:${size}px;height:${size}px" aria-hidden="true"></span>`;
+      const label = btn.querySelector && btn.querySelector("[data-refresh-label]");
+      const iconSlot = btn.querySelector && (btn.querySelector("[data-icon]") || btn.querySelector(".ico")) || null;
+      if (label && iconSlot) {
+        iconSlot.outerHTML = spinner;
+      } else if (label) {
+        btn.insertAdjacentHTML("afterbegin", spinner);
+      } else {
+        btn.innerHTML = spinner;
+      }
+    } else {
+      btn.removeAttribute("aria-busy");
+      btn.classList.remove("is-refreshing");
+      if (btn.dataset && btn.dataset.refreshIdleHtml != null) {
+        btn.innerHTML = btn.dataset.refreshIdleHtml;
+        delete btn.dataset.refreshIdleHtml;
+      }
+    }
+  }
+  function applyRefreshMenuBusy(root, busy) {
+    const scope = root && root.querySelectorAll ? root : typeof document !== "undefined" ? document : null;
+    if (!scope || !scope.querySelectorAll) return;
+    const text = busy ? REFRESH_MENU_BUSY_LABEL : REFRESH_MENU_IDLE_LABEL;
+    scope.querySelectorAll('[data-more-act="refresh"]').forEach((el2) => {
+      el2.setAttribute("aria-busy", busy ? "true" : "false");
+      el2.setAttribute("title", text);
+      if (busy) el2.classList.add("is-refreshing");
+      else el2.classList.remove("is-refreshing");
+      const label = el2.querySelector("[data-refresh-label]") || el2.querySelector("span:last-child");
+      if (label) label.textContent = text;
+      else if (!el2.querySelector(".ico") && !el2.querySelector("[data-icon]")) {
+        el2.textContent = text;
+      }
+    });
+  }
+  function applyRefreshHint(el2, busy) {
+    if (!el2) return;
+    el2.hidden = !busy;
+    if (busy) el2.textContent = REFRESH_HINT_TEXT;
   }
 
   // ui/lib/sanitize.js
@@ -2562,25 +3038,29 @@
 
   // ui/lib/shownoteActions.js
   var SHOWNNOTE_FOOT_CLASS = "modal__foot--episode-actions";
-  function shownoteFootActions(ep) {
+  var QUEUE_ADD_LABEL2 = "\u52A0\u5165\u300C\u64AD\u5BA2\u300D\u5217\u8868";
+  var QUEUE_ADD_SHORT_LABEL = "\u52A0\u5165\u5217\u8868";
+  var PLAY_THROUGH_HINT = "\u4ECE\u8FD9\u4E00\u96C6\u5F00\u59CB\uFF0C\u987A\u5E8F\u64AD\u5B8C\u300C\u64AD\u5BA2\u300D\u5217\u8868";
+  function shownoteFootActions(ep, opts = {}) {
     const favorited = !!(ep && ep.favorited);
+    const playHint = opts.fromWaitlist ? PLAY_THROUGH_HINT : "\u64AD\u653E\u8FD9\u4E00\u96C6";
     return [
       {
         key: "play",
         label: "\u64AD\u653E",
         shortLabel: "\u64AD\u653E",
-        ariaLabel: "\u4ECE\u8FD9\u4E00\u96C6\u5F00\u59CB\uFF0C\u6309\u64AD\u653E\u5217\u8868\u987A\u5E8F\u7EE7\u7EED",
-        title: "\u4ECE\u8FD9\u4E00\u96C6\u5F00\u59CB\uFF0C\u6309\u64AD\u653E\u5217\u8868\u987A\u5E8F\u7EE7\u7EED",
+        ariaLabel: playHint,
+        title: playHint,
         kind: "primary",
         iconName: "play",
         close: true
       },
       {
         key: "queue",
-        label: "\u52A0\u5165\u64AD\u653E\u5217\u8868",
-        shortLabel: "\u52A0\u5165\u5217\u8868",
-        ariaLabel: "\u52A0\u5165\u64AD\u653E\u5217\u8868",
-        title: "\u52A0\u5165\u64AD\u653E\u5217\u8868",
+        label: QUEUE_ADD_LABEL2,
+        shortLabel: QUEUE_ADD_SHORT_LABEL,
+        ariaLabel: QUEUE_ADD_LABEL2,
+        title: QUEUE_ADD_LABEL2,
         kind: "tonal",
         iconName: "listPlus",
         close: true
@@ -2621,9 +3101,10 @@
     if (dur) bits.push(fmtSec(dur));
     return bits.join(" \xB7 ");
   }
-  async function openShowNote(ep) {
+  async function openShowNote(ep, opts = {}) {
     if (!ep) return;
     context = ep;
+    const fromWaitlist = !!opts.fromWaitlist;
     const body = document.createElement("div");
     body.className = "sn-frame";
     let note = ep.showNote || ep.description || "";
@@ -2640,7 +3121,7 @@
     const safeNote = hasNote ? looksLikeHtml(note) ? sanitizeShowNote(note) : `<p>${escapeHtml(note).replace(/\n{2,}/g, "</p><p>").replace(/\n/g, "<br />")}</p>` : `<p class="muted">\u6682\u65E0 ShowNote\u3002\u53EF\u5728\u300C\u8BA2\u9605\u300D\u4E2D\u5237\u65B0\u8BE5\u8282\u76EE\u540E\u518D\u8BD5\u3002</p>`;
     const html = `<div class="sn-head"><div class="sn-meta">${escapeHtml(metaLine(ep))}</div><div class="sn-title">${escapeHtml(ep.title || "ShowNote")}</div></div><div class="sn-body" id="snBody">` + safeNote + `</div>`;
     body.innerHTML = html;
-    const [playAct, queueAct, castAct, favAct] = shownoteFootActions(ep);
+    const [playAct, queueAct, castAct, favAct] = shownoteFootActions(ep, { fromWaitlist });
     openModal({
       title: "",
       body,
@@ -2650,7 +3131,7 @@
         {
           ...playAct,
           onClick: () => {
-            playEpisode(episodePayload(ep));
+            playEpisode(episodePayload(ep), { fromWaitlist });
           }
         },
         {
@@ -2672,37 +3153,310 @@
     if (snBody) snBody.scrollTop = 0;
   }
 
+  // ui/lib/clipboard.js
+  async function copyText(text) {
+    const value = String(text ?? "");
+    if (!value) return false;
+    if (typeof navigator !== "undefined" && navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      try {
+        await navigator.clipboard.writeText(value);
+        return true;
+      } catch (_) {
+      }
+    }
+    if (typeof document === "undefined" || !document.body) return false;
+    const ta = document.createElement("textarea");
+    ta.value = value;
+    ta.setAttribute("readonly", "");
+    ta.setAttribute("aria-hidden", "true");
+    ta.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;opacity:0;";
+    document.body.appendChild(ta);
+    try {
+      ta.focus();
+      ta.select();
+      ta.setSelectionRange(0, value.length);
+      return !!(document.execCommand && document.execCommand("copy"));
+    } catch (_) {
+      return false;
+    } finally {
+      try {
+        document.body.removeChild(ta);
+      } catch (_) {
+      }
+    }
+  }
+
+  // ui/lib/episodePages.js
+  var EPISODE_PAGE_SIZE = 20;
+  var MAX_EPISODE_PAGE = 100;
+  var ADD_ALL_CONFIRM_THRESHOLD = 50;
+  var DEFAULT_HISTORY_INDEX_LIMIT = 2e3;
+  var HISTORY_INDEX_COMPLETE_TOAST = "\u5DF2\u6309\u6E90\u91CC\u73B0\u6709\u8282\u76EE\u6536\u5F55\uFF0C\u66F4\u65E9\u7684\u65E0\u6CD5\u627E\u56DE\u3002";
+  var REFRESH_UP_TO_DATE_TOAST = "\u5DF2\u662F\u6700\u65B0";
+  function pageEpisodes(episodes, offset = 0, limit = EPISODE_PAGE_SIZE) {
+    const list = Array.isArray(episodes) ? episodes : [];
+    const off = Math.max(0, Math.floor(Number(offset) || 0));
+    const hasLimit = limit != null && limit !== "" && Number.isFinite(Number(limit));
+    const remaining = Math.max(0, list.length - off);
+    const lim = hasLimit ? Math.max(1, Math.min(MAX_EPISODE_PAGE, Math.floor(Number(limit) || EPISODE_PAGE_SIZE))) : remaining;
+    const items = list.slice(off, off + lim);
+    return {
+      items,
+      offset: off,
+      limit: hasLimit ? lim : items.length,
+      total: list.length,
+      hasMore: off + items.length < list.length,
+      nextOffset: off + items.length,
+      shown: Math.min(off + items.length, list.length)
+    };
+  }
+  function preservedRenderCount({ previousShown, previousSubId, nextSubId, nextTotal } = {}) {
+    if (previousSubId && nextSubId && String(previousSubId) !== String(nextSubId)) return 0;
+    const shown = Math.max(0, Math.floor(Number(previousShown) || 0));
+    const total = Math.max(0, Math.floor(Number(nextTotal) || 0));
+    if (!shown) return 0;
+    return Math.min(shown, total);
+  }
+  function shouldConfirmAddAll(count) {
+    return (Number(count) || 0) > ADD_ALL_CONFIRM_THRESHOLD;
+  }
+  function addAllConfirmCopy(count, cap = DEFAULT_HISTORY_INDEX_LIMIT) {
+    const n = Number(count) || 0;
+    const limit = Number(cap) || DEFAULT_HISTORY_INDEX_LIMIT;
+    return `\u5C06\u628A ${n} \u96C6\u5168\u90E8\u52A0\u5165\u300C\u64AD\u5BA2\u300D\u5217\u8868\uFF08\u8FFD\u52A0\u5230\u672B\u5C3E\uFF0C\u4E0D\u4F1A\u6539\u52A8\u6B63\u5728\u64AD\u653E\u7684\u987A\u5E8F\uFF09\u3002\u6570\u91CF\u8F83\u591A\uFF08\u672C\u5730\u6700\u591A\u53EF\u7D22\u5F15 ${limit} \u96C6\uFF09\uFF0C\u786E\u5B9A\u8981\u4E00\u6B21\u52A0\u5165\u6574\u8868\u5417\uFF1F\u53D6\u6D88\u5219\u4E0D\u4F1A\u52A0\u5165\u3002`;
+  }
+  function episodeLabel(ep) {
+    if (!ep) return "";
+    const t = typeof ep.title === "string" ? ep.title.trim() : "";
+    return t || (typeof ep.pubDate === "string" ? ep.pubDate : "") || "";
+  }
+  function retainedRangeCopy(range) {
+    if (!range || !range.newest || !range.oldest) return "";
+    const a = episodeLabel(range.newest);
+    const b = episodeLabel(range.oldest);
+    if (!a && !b) return "";
+    if (a === b) return `\uFF08\u5DF2\u4FDD\u7559\u300A${a}\u300B\uFF09`;
+    return `\uFF08\u5DF2\u4FDD\u7559\u4ECE\u300A${a}\u300B\u5230\u300A${b}\u300B\uFF09`;
+  }
+  function historyIndexCopy(info = {}) {
+    const status = info.status || "idle";
+    const indexed = Number(info.indexedCount) || 0;
+    const feed = Number(info.feedAvailableCount) || 0;
+    const cap = Number(info.cap) || DEFAULT_HISTORY_INDEX_LIMIT;
+    if (status === "running") {
+      return { tone: "busy", text: "\u6B63\u5728\u7D22\u5F15\u8BE5\u9891\u9053\u7684\u5386\u53F2\u8282\u76EE\u2026" };
+    }
+    if (status === "error") {
+      return { tone: "err", text: info.error ? `\u7D22\u5F15\u5931\u8D25\uFF1A${info.error}` : "\u7D22\u5F15\u5931\u8D25\uFF0C\u53EF\u4EE5\u91CD\u8BD5" };
+    }
+    if (status === "success" && info.capped) {
+      if (info.earliestKept === true || info.earliestConfirmed === true) {
+        return {
+          tone: "ok",
+          text: `\u6E90\u4E2D\u5171 ${feed} \u96C6\uFF0C\u672C\u5730\u5B89\u5168\u4E0A\u9650 ${cap}\uFF0C\u5DF2\u4FDD\u7559\u6700\u8FD1 ${Math.max(0, cap - 1)} \u96C6\u548C\u6700\u65E9\u4E00\u96C6\uFF0C\u4E2D\u95F4\u672A\u6536\u5F55`
+        };
+      }
+      return {
+        tone: "ok",
+        text: `\u6E90\u4E2D\u5171 ${feed} \u96C6\uFF0C\u672C\u5730\u5B89\u5168\u4E0A\u9650 ${cap}\uFF0C\u672A\u80FD\u786E\u8BA4\u7B2C\u4E00\u671F\uFF0C\u5DF2\u4FDD\u7559\u6700\u8FD1 ${indexed} \u96C6${retainedRangeCopy(info.retainedRange)}`
+      };
+    }
+    if (status === "success") {
+      return { tone: "ok", text: "" };
+    }
+    if (info.truncated) {
+      return {
+        tone: "muted",
+        text: `\u5F53\u524D\u4FDD\u7559\u6700\u8FD1 ${indexed} \u96C6\uFF0C\u66F4\u65E9\u7684\u53EF\u70B9\u7D22\u5F15\u5386\u53F2\u3002`
+      };
+    }
+    return { tone: "muted", text: "" };
+  }
+
   // ui/views/channel-dialog.js
-  var BATCH_SIZE = 20;
-  var state2 = {
-    modal: null,
-    subId: "",
-    title: "",
-    episodes: [],
-    rendered: 0,
-    busy: false,
-    done: false
-  };
-  function footer(count) {
-    return `<div class="ep-batch-status muted" id="epBatchStatus">\u5DF2\u663E\u793A ${count} \u96C6</div>`;
+  function emptyChannelState(subId = "") {
+    return {
+      modal: null,
+      subId,
+      title: "",
+      author: "",
+      description: "",
+      url: "",
+      coverUrl: null,
+      lastSuccessAt: null,
+      aboutExpanded: false,
+      episodes: [],
+      rendered: 0,
+      busy: false,
+      done: false,
+      total: 0,
+      truncated: false,
+      historyIndexed: false,
+      historyIndexStatus: "idle",
+      historyIndexError: null,
+      feedEpisodeCount: 0,
+      capped: false,
+      earliestConfirmed: false,
+      historyIndexLimit: DEFAULT_HISTORY_INDEX_LIMIT
+    };
+  }
+  var state2 = emptyChannelState();
+  function resetChannelState() {
+    state2 = emptyChannelState();
+  }
+  function episodeFingerprint(ep) {
+    if (!ep) return "";
+    return String(ep.guid || ep.enclosureUrl || ep.id || ep.title || "");
+  }
+  function askAddAllConfirm(body, count, cap = DEFAULT_HISTORY_INDEX_LIMIT) {
+    return new Promise((resolve) => {
+      const box = body.querySelector("#channelAddAllConfirm");
+      const addBtn = body.querySelector("#channelAddAll");
+      if (!box) {
+        resolve(false);
+        return;
+      }
+      const prevDisabled = addBtn ? addBtn.disabled : false;
+      if (addBtn) addBtn.disabled = true;
+      box.hidden = false;
+      box.innerHTML = `<p>${escapeHtml(addAllConfirmCopy(count, cap))}</p><div class="channel-addall-confirm__actions"><button type="button" class="btn btn--ghost btn--sm" data-addall="no">\u53D6\u6D88</button><button type="button" class="btn btn--primary btn--sm" data-addall="yes">\u786E\u5B9A\u52A0\u5165\u6574\u8868</button></div>`;
+      const done = (value) => {
+        box.hidden = true;
+        box.innerHTML = "";
+        if (addBtn) addBtn.disabled = prevDisabled;
+        resolve(value);
+      };
+      box.querySelector('[data-addall="yes"]').addEventListener("click", () => done(true));
+      box.querySelector('[data-addall="no"]').addEventListener("click", () => done(false));
+    });
+  }
+  function pagerText() {
+    if (!state2.total) return "";
+    if (state2.done || state2.rendered >= state2.total) return "";
+    return `\u5DF2\u663E\u793A ${state2.rendered} / ${state2.total} \u96C6`;
+  }
+  function paintIndexStatus(body) {
+    const el2 = body.querySelector("#channelIndexStatus");
+    const btn = body.querySelector("#channelIndexHistory");
+    if (!el2) return;
+    const copy = historyIndexCopy({
+      status: state2.historyIndexStatus,
+      error: state2.historyIndexError,
+      indexedCount: state2.total,
+      feedAvailableCount: state2.feedEpisodeCount,
+      truncated: state2.truncated,
+      capped: state2.capped,
+      cap: state2.historyIndexLimit || DEFAULT_HISTORY_INDEX_LIMIT,
+      earliestConfirmed: state2.earliestConfirmed,
+      earliestKept: state2.earliestConfirmed
+    });
+    el2.hidden = !copy.text;
+    el2.className = "channel-index-status muted" + (copy.tone ? " is-" + copy.tone : "");
+    el2.textContent = copy.text;
+    paintFootVisibility(body);
+    if (btn) {
+      const running = state2.historyIndexStatus === "running";
+      btn.disabled = running;
+      btn.setAttribute("aria-busy", running ? "true" : "false");
+      const label = btn.querySelector("[data-index-label]");
+      if (label) label.textContent = running ? "\u6B63\u5728\u7D22\u5F15\u2026" : state2.historyIndexStatus === "error" ? "\u91CD\u8BD5\u7D22\u5F15\u5386\u53F2" : "\u7D22\u5F15\u5386\u53F2";
+    }
+  }
+  function paintFootVisibility(body) {
+    const foot = body.querySelector(".channel-dialog__foot");
+    if (!foot) return;
+    const visible = Array.from(foot.children).some((el2) => {
+      if (el2.hidden) return false;
+      if (el2.tagName === "BUTTON") return true;
+      return String(el2.textContent || "").trim().length > 0;
+    });
+    foot.hidden = !visible;
+  }
+  function paintPager(body) {
+    const status = body.querySelector("#epBatchStatus");
+    const more = body.querySelector("#channelLoadMore");
+    const text = pagerText();
+    if (status) {
+      status.textContent = text;
+      status.hidden = !text;
+    }
+    if (more) {
+      more.hidden = !!state2.done || !state2.total;
+      more.disabled = !!state2.busy;
+    }
+    paintFootVisibility(body);
+  }
+  function channelCoverHtml() {
+    const abs = absoluteCoverUrl(state2.coverUrl);
+    if (abs) {
+      return `<img class="channel-dialog__cover" src="${escapeHtml(abs)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`;
+    }
+    const letter = String(state2.title || "?").trim().charAt(0).toUpperCase() || "?";
+    return `<div class="channel-dialog__cover cover-ph" style="background:${colorFromString(state2.title || "")}">${escapeHtml(letter)}</div>`;
+  }
+  function paintHero(body) {
+    const cover = body.querySelector("#channelHeroCover");
+    const title = body.querySelector("#channelHeroTitle");
+    const author = body.querySelector("#channelHeroAuthor");
+    const count = body.querySelector("#channelHeroCount");
+    const desc = body.querySelector("#channelDesc");
+    const moreBtn = body.querySelector("#channelDescMore");
+    const extra = body.querySelector("#channelAboutExtra");
+    const urlEl = body.querySelector("#channelUrl");
+    const lastEl = body.querySelector("#channelLastSuccess");
+    if (cover) cover.innerHTML = channelCoverHtml();
+    if (title) title.textContent = state2.title || "";
+    if (author) {
+      const a = String(state2.author || "").trim();
+      author.hidden = !a;
+      author.textContent = a;
+    }
+    if (count) count.textContent = state2.total ? `\u5171 ${state2.total} \u96C6` : "\u5171 0 \u96C6";
+    const text = String(state2.description || "").trim();
+    const hasDesc = !!text;
+    if (desc) {
+      desc.hidden = !hasDesc;
+      desc.textContent = text;
+      desc.classList.toggle("is-expanded", !!state2.aboutExpanded);
+    }
+    if (moreBtn) {
+      moreBtn.hidden = !hasDesc;
+      moreBtn.textContent = state2.aboutExpanded ? "\u6536\u8D77" : "\u66F4\u591A";
+      moreBtn.setAttribute("aria-expanded", state2.aboutExpanded ? "true" : "false");
+    }
+    if (extra) {
+      extra.hidden = hasDesc ? !state2.aboutExpanded : false;
+    }
+    if (urlEl) {
+      urlEl.textContent = state2.url || "";
+      urlEl.title = state2.url || "";
+    }
+    if (lastEl) {
+      lastEl.textContent = state2.lastSuccessAt ? `\u4E0A\u6B21\u5237\u65B0\u6210\u529F ${fmtTime(state2.lastSuccessAt)}` : "\u8FD8\u6CA1\u6709\u6210\u529F\u5237\u65B0\u8BB0\u5F55";
+    }
+  }
+  function setModalTitle(text) {
+    const titleEl = document.getElementById("appModalTitle");
+    if (!titleEl) return;
+    titleEl.textContent = text || "";
+    titleEl.style.display = text ? "" : "none";
   }
   function renderNextBatch(body) {
     const list = body.querySelector("#channelEpList");
-    const status = body.querySelector("#epBatchStatus");
     if (!list || state2.done) return;
-    const slice = state2.episodes.slice(state2.rendered, state2.rendered + BATCH_SIZE);
-    if (!slice.length) {
+    const page = pageEpisodes(state2.episodes, state2.rendered, EPISODE_PAGE_SIZE);
+    if (!page.items.length) {
       state2.done = true;
-      if (status) status.textContent = `\u5171 ${state2.episodes.length} \u96C6`;
+      paintPager(body);
       return;
     }
     const startIdx = state2.rendered;
-    const html = slice.map((ep, i) => {
+    const html = page.items.map((ep, i) => {
       const idx = startIdx + i;
       return episodeRowHtml(ep, idx, {
         showDate: true,
         actions: [
-          { act: "queue", iconName: "listPlus", title: "\u52A0\u5165\u64AD\u653E\u5217\u8868" },
+          { act: "queue", iconName: "listPlus", title: "\u52A0\u5165\u300C\u64AD\u5BA2\u300D\u5217\u8868" },
           {
             act: "fav",
             iconName: "star",
@@ -2721,10 +3475,9 @@
     wrapper.innerHTML = html;
     bindRowInteractions(wrapper, state2.episodes);
     while (wrapper.firstChild) list.appendChild(wrapper.firstChild);
-    state2.rendered += slice.length;
-    if (status) {
-      status.textContent = state2.rendered >= state2.episodes.length ? `\u5171 ${state2.episodes.length} \u96C6` : `\u5DF2\u663E\u793A ${state2.rendered} / ${state2.episodes.length} \u96C6`;
-    }
+    state2.rendered = page.nextOffset;
+    state2.done = !page.hasMore;
+    paintPager(body);
   }
   function fillToScroll(body) {
     const list = body.querySelector("#channelEpList");
@@ -2733,64 +3486,246 @@
     while (!state2.done && list.scrollHeight <= list.clientHeight + 8 && guard < 50) {
       const before = state2.rendered;
       renderNextBatch(body);
-      guard++;
+      guard += 1;
       if (state2.rendered === before) break;
     }
   }
+  function applyEpisodePayload(data2, subId) {
+    state2.subId = subId;
+    state2.title = data2.title || subId;
+    state2.author = typeof data2.author === "string" ? data2.author : "";
+    state2.description = typeof data2.description === "string" ? data2.description : "";
+    state2.url = typeof data2.url === "string" ? data2.url : state2.url || "";
+    state2.coverUrl = data2.coverUrl || null;
+    state2.lastSuccessAt = typeof data2.lastSuccessAt === "number" && Number.isFinite(data2.lastSuccessAt) ? data2.lastSuccessAt : null;
+    state2.episodes = (data2.episodes || []).map((ep) => ({
+      ...ep,
+      subscriptionId: ep.subscriptionId || subId,
+      showTitle: ep.showTitle || state2.title
+    }));
+    state2.total = Number(data2.total != null ? data2.total : state2.episodes.length) || state2.episodes.length;
+    state2.truncated = !!data2.truncated;
+    state2.historyIndexed = !!data2.historyIndexed;
+    state2.historyIndexStatus = data2.historyIndexStatus || "idle";
+    state2.historyIndexError = data2.historyIndexError || null;
+    state2.feedEpisodeCount = Number(data2.feedEpisodeCount) || state2.total;
+    state2.capped = !!data2.capped;
+    state2.earliestConfirmed = !!data2.earliestConfirmed;
+    state2.historyIndexLimit = Number(data2.historyIndexLimit || data2.cap) || DEFAULT_HISTORY_INDEX_LIMIT;
+  }
+  async function loadEpisodes(body, subId, opts = {}) {
+    const list = body.querySelector("#channelEpList");
+    if (!list) return;
+    const preserve = !!opts.preserve && state2.subId === subId && state2.rendered > 0;
+    const keepShown = preserve ? preservedRenderCount({
+      previousShown: state2.rendered,
+      previousSubId: state2.subId,
+      nextSubId: subId,
+      nextTotal: state2.total
+    }) : 0;
+    const scrollTop = preserve ? list.scrollTop : 0;
+    if (!preserve) {
+      state2.rendered = 0;
+      state2.done = false;
+      list.innerHTML = '<div class="empty">\u52A0\u8F7D\u4E2D\u2026</div>';
+    }
+    state2.busy = true;
+    paintPager(body);
+    let data2;
+    try {
+      data2 = await api.getEpisodes(subId);
+    } catch (e) {
+      list.innerHTML = `<div class="empty">\u52A0\u8F7D\u5267\u96C6\u5931\u8D25\uFF1A${escapeHtml(String(e))}</div>`;
+      state2.busy = false;
+      state2.done = true;
+      paintPager(body);
+      return;
+    }
+    if (!data2 || !data2.ok) {
+      list.innerHTML = `<div class="empty">${escapeHtml(data2 && data2.error || "\u52A0\u8F7D\u5267\u96C6\u5931\u8D25")}</div>`;
+      state2.busy = false;
+      state2.done = true;
+      paintPager(body);
+      return;
+    }
+    applyEpisodePayload(data2, subId);
+    setModalTitle(state2.title || "");
+    paintHero(body);
+    paintIndexStatus(body);
+    const target = preserve ? preservedRenderCount({
+      previousShown: keepShown || state2.rendered,
+      previousSubId: subId,
+      nextSubId: subId,
+      nextTotal: state2.total
+    }) : 0;
+    state2.rendered = 0;
+    state2.done = false;
+    list.innerHTML = "";
+    if (!state2.episodes.length) {
+      list.innerHTML = '<div class="empty">\u8BE5\u8BA2\u9605\u8FD8\u6CA1\u6709\u5267\u96C6\u7D22\u5F15\u3002\u70B9\u300C\u5237\u65B0\u300D\u6216\u300C\u7D22\u5F15\u5386\u53F2\u300D\u91CD\u65B0\u62C9\u53D6\u3002</div>';
+      state2.busy = false;
+      state2.done = true;
+      paintPager(body);
+      return;
+    }
+    const want = Math.max(EPISODE_PAGE_SIZE, target);
+    while (state2.rendered < want && !state2.done) renderNextBatch(body);
+    state2.busy = false;
+    paintPager(body);
+    requestAnimationFrame(() => {
+      fillToScroll(body);
+      if (preserve) list.scrollTop = scrollTop;
+    });
+  }
   async function openChannelDialog(subId) {
     if (!subId) return;
-    state2 = {
-      modal: null,
-      subId,
-      title: "",
-      episodes: [],
-      rendered: 0,
-      busy: true,
-      done: false
-    };
+    state2 = emptyChannelState(subId);
+    state2.busy = true;
     const body = document.createElement("div");
     body.className = "channel-dialog";
-    body.innerHTML = `<div class="channel-dialog__head"><div class="channel-dialog__title" id="channelTitle">\u5267\u96C6</div><div class="channel-dialog__actions"><button type="button" class="chip-btn" id="channelRefresh" title="\u91CD\u65B0\u62C9\u53D6\u8BE5\u9891\u9053\u7684\u5267\u96C6\u7D22\u5F15"><span data-icon="rotateCcw" data-size="14"></span><span>\u5237\u65B0</span></button><button type="button" class="btn btn--tonal btn--sm" id="channelAddAll">\u5168\u90E8\u52A0\u5165\u64AD\u653E\u5217\u8868</button></div></div><div class="ep-list channel-dialog__list" id="channelEpList"></div>` + footer(0);
+    body.innerHTML = `<div class="channel-dialog__head"><div class="channel-dialog__hero"><div class="channel-dialog__cover-wrap" id="channelHeroCover"></div><div class="channel-dialog__hero-text"><div class="channel-dialog__hero-title" id="channelHeroTitle"></div><div class="channel-dialog__hero-author muted" id="channelHeroAuthor" hidden></div><div class="channel-dialog__hero-count muted" id="channelHeroCount">\u5171 0 \u96C6</div></div></div><div class="channel-dialog__about"><div class="channel-dialog__desc" id="channelDesc" hidden></div><button type="button" class="channel-dialog__more" id="channelDescMore" aria-expanded="false" hidden>\u66F4\u591A</button><div class="channel-dialog__about-extra" id="channelAboutExtra" hidden><div class="channel-dialog__url-row"><code class="channel-dialog__url" id="channelUrl"></code><button type="button" class="btn btn--ghost btn--sm" id="channelCopyUrl" title="\u590D\u5236\u6E90\u5730\u5740"><span data-icon="copy" data-size="14"></span><span>\u590D\u5236</span></button></div><div class="channel-dialog__last-success muted" id="channelLastSuccess"></div></div></div><div class="channel-dialog__actions"><button type="button" class="chip-btn" id="channelRefresh" title="\u5237\u65B0\u8BE5\u9891\u9053\u6700\u8FD1\u8282\u76EE\u7684\u81EA\u52A8\u7D22\u5F15"><span data-icon="rotateCcw" data-size="14"></span><span data-refresh-label>\u5237\u65B0</span></button><button type="button" class="chip-btn" id="channelIndexHistory" title="\u6839\u636E\u8BE5\u9891\u9053\u6E90\u4E2D\u73B0\u6709\u6761\u76EE\u8865\u5EFA\u5386\u53F2\u7D22\u5F15\uFF0C\u4E0D\u4F1A\u627E\u56DE\u6E90\u91CC\u6CA1\u6709\u7684\u8282\u76EE"><span data-icon="history" data-size="14"></span><span data-index-label>\u7D22\u5F15\u5386\u53F2</span></button><button type="button" class="btn btn--tonal btn--sm" id="channelAddAll" title="\u5C06\u5F53\u524D\u5DF2\u7D22\u5F15\u5267\u96C6\u5168\u90E8\u8FFD\u52A0\u5230\u300C\u64AD\u5BA2\u300D\u5217\u8868\u672B\u5C3E">\u5168\u90E8\u52A0\u5165</button></div></div><div class="channel-addall-confirm" id="channelAddAllConfirm" hidden></div><div class="ep-list channel-dialog__list" id="channelEpList"></div><div class="channel-dialog__foot" hidden><div class="ep-batch-status muted" id="epBatchStatus" hidden></div><div class="channel-index-status muted" id="channelIndexStatus" hidden></div><button type="button" class="btn btn--ghost btn--sm" id="channelLoadMore" hidden>\u52A0\u8F7D\u66F4\u591A</button></div>`;
     const list = body.querySelector("#channelEpList");
     list.innerHTML = '<div class="empty">\u52A0\u8F7D\u4E2D\u2026</div>';
     hydrateIconSlots(body);
+    const channelRefreshBtn = body.querySelector("#channelRefresh");
+    const stopRefreshUi = onFeedRefreshState((busy) => applyRefreshButtonBusy(channelRefreshBtn, busy));
+    paintHero(body);
+    body.querySelector("#channelDescMore").addEventListener("click", () => {
+      state2.aboutExpanded = !state2.aboutExpanded;
+      paintHero(body);
+    });
+    body.querySelector("#channelCopyUrl").addEventListener("click", async () => {
+      const ok = await copyText(String(state2.url || ""));
+      if (ok) notify("\u5DF2\u590D\u5236\u6E90\u5730\u5740", "ok");
+      else notify("\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u624B\u52A8\u9009\u62E9\u5730\u5740\u590D\u5236", "warn");
+    });
     openModal({
       title: "",
       body,
       size: "wide",
-      actions: [{ label: "\u5173\u95ED", kind: "ghost", close: true }]
+      actions: [],
+      closeIcon: "arrowLeft",
+      closeLabel: "\u8FD4\u56DE",
+      closeLeading: true,
+      onClose: () => {
+        try {
+          stopRefreshUi();
+        } catch (_) {
+        }
+        resetChannelState();
+      }
     });
     body.querySelector("#channelAddAll").addEventListener("click", async (ev) => {
       const btn = ev.currentTarget;
+      const count = state2.episodes.length;
+      if (!count) {
+        notify("\u6CA1\u6709\u53EF\u52A0\u5165\u7684\u5267\u96C6", "warn");
+        return;
+      }
+      if (shouldConfirmAddAll(count)) {
+        const accepted = await askAddAllConfirm(body, count, state2.historyIndexLimit || DEFAULT_HISTORY_INDEX_LIMIT);
+        if (!accepted) {
+          notify("\u5DF2\u53D6\u6D88\uFF0C\u672A\u52A0\u5165\u300C\u64AD\u5BA2\u300D\u5217\u8868", "muted");
+          return;
+        }
+      }
+      const prev = btn.textContent;
       btn.disabled = true;
+      btn.textContent = "\u6B63\u5728\u52A0\u5165\u2026";
       try {
         const r = await api.queueAddShow(subId);
-        notify(r.ok ? `\u5DF2\u8FFD\u52A0 ${r.added} \u9996` : r.error || "\u52A0\u5165\u5931\u8D25", r.ok ? "ok" : "err");
+        notify(r.ok ? `\u5DF2\u8FFD\u52A0 ${r.added} \u9996\u5230\u300C\u64AD\u5BA2\u300D\u5217\u8868\u672B\u5C3E` : r.error || "\u52A0\u5165\u5931\u8D25", r.ok ? "ok" : "err");
       } finally {
         btn.disabled = false;
+        btn.textContent = prev;
       }
     });
-    body.querySelector("#channelRefresh").addEventListener("click", async (ev) => {
-      const btn = ev.currentTarget;
-      btn.disabled = true;
-      list.innerHTML = '<div class="empty">\u6B63\u5728\u5237\u65B0\u8BE5\u9891\u9053\u2026</div>';
+    channelRefreshBtn.addEventListener("click", async () => {
+      if (isFeedRefreshing()) return;
+      const prevTotal = state2.total;
+      const prevTop = episodeFingerprint(state2.episodes[0]);
       try {
-        const r = await api.refreshOne(subId);
-        notify(
-          r && r.ok ? "\u5DF2\u5237\u65B0\u8BE5\u9891\u9053" : r && r.error || "\u5237\u65B0\u5931\u8D25",
-          r && r.ok ? "ok" : "err"
-        );
+        const r = await runFeedRefreshOne({
+          refreshOne: () => api.refreshOne(subId),
+          afterRefresh: async (result) => {
+            if (!result || result.noop) return;
+            if (!result.ok && (result.skipped || isSkippedBusy(result))) {
+              notify(REFRESH_BUSY_TOAST, "warn");
+              await trackRemoteRefreshBusy(api);
+              return;
+            }
+            await loadEpisodes(body, subId, { preserve: true });
+            if (result.ok) {
+              const unchanged = state2.total === prevTotal && episodeFingerprint(state2.episodes[0]) === prevTop;
+              notify(unchanged ? REFRESH_UP_TO_DATE_TOAST : "\u5DF2\u5237\u65B0\u8BE5\u9891\u9053", unchanged ? "muted" : "ok");
+            } else {
+              notify(humanizeRefreshFailure(result), "err");
+            }
+          }
+        });
+        if (r && r.noop) return;
       } catch (e) {
-        notify(String(e), "err");
-      } finally {
-        btn.disabled = false;
-        await loadEpisodes(body, subId);
+        if (isSkippedBusy(e)) {
+          notify(REFRESH_BUSY_TOAST, "warn");
+          void trackRemoteRefreshBusy(api);
+          return;
+        }
+        notify(humanizeRefreshFailure(e), "err");
+        await loadEpisodes(body, subId, { preserve: true });
       }
+    });
+    body.querySelector("#channelIndexHistory").addEventListener("click", async () => {
+      state2.historyIndexStatus = "running";
+      state2.historyIndexError = null;
+      paintIndexStatus(body);
+      notify("\u6B63\u5728\u7D22\u5F15\u8BE5\u9891\u9053\u7684\u5386\u53F2\u8282\u76EE\u2026", "muted");
+      try {
+        const r = await api.indexHistory(subId);
+        if (r && r.alreadyRunning) {
+          state2.historyIndexStatus = "running";
+          notify("\u8BE5\u9891\u9053\u6B63\u5728\u7D22\u5F15\uFF0C\u8BF7\u7A0D\u5019", "warn");
+          paintIndexStatus(body);
+          return;
+        }
+        if (!r || !r.ok) {
+          state2.historyIndexStatus = "error";
+          state2.historyIndexError = r && (r.error || r.historyIndexError) || "\u7D22\u5F15\u5931\u8D25";
+          paintIndexStatus(body);
+          notify(state2.historyIndexError, "err");
+          return;
+        }
+        state2.historyIndexStatus = "success";
+        state2.feedEpisodeCount = Number(r.feedAvailableCount) || 0;
+        state2.capped = !!r.capped;
+        state2.truncated = !!r.truncated;
+        state2.earliestConfirmed = !!r.earliestConfirmed;
+        state2.historyIndexLimit = Number(r.cap || r.historyIndexLimit) || DEFAULT_HISTORY_INDEX_LIMIT;
+        const copy = historyIndexCopy({
+          status: "success",
+          indexedCount: r.indexedCount,
+          feedAvailableCount: r.feedAvailableCount,
+          capped: r.capped,
+          cap: state2.historyIndexLimit,
+          earliestConfirmed: state2.earliestConfirmed,
+          earliestKept: state2.earliestConfirmed
+        });
+        notify(copy.text || HISTORY_INDEX_COMPLETE_TOAST, copy.text ? "ok" : "muted");
+        await loadEpisodes(body, subId, { preserve: true });
+      } catch (e) {
+        state2.historyIndexStatus = "error";
+        state2.historyIndexError = String(e);
+        paintIndexStatus(body);
+        notify(String(e), "err");
+      }
+    });
+    body.querySelector("#channelLoadMore").addEventListener("click", () => {
+      if (state2.busy || state2.done) return;
+      renderNextBatch(body);
     });
     list.addEventListener(
       "scroll",
       () => {
-        if (state2.done) return;
+        if (state2.done || state2.busy) return;
         if (list.scrollTop + list.clientHeight >= list.scrollHeight - 120) {
           renderNextBatch(body);
         }
@@ -2799,54 +3734,13 @@
     );
     await loadEpisodes(body, subId);
   }
-  async function loadEpisodes(body, subId) {
-    const list = body.querySelector("#channelEpList");
-    const titleEl = body.querySelector("#channelTitle");
-    if (!list) return;
-    state2.rendered = 0;
-    state2.done = false;
-    state2.busy = true;
-    list.innerHTML = '<div class="empty">\u52A0\u8F7D\u4E2D\u2026</div>';
-    let data2;
-    try {
-      data2 = await api.getEpisodes(subId);
-    } catch (e) {
-      list.innerHTML = `<div class="empty">\u52A0\u8F7D\u5267\u96C6\u5931\u8D25\uFF1A${escapeHtml(String(e))}</div>`;
-      state2.busy = false;
-      return;
-    }
-    if (!data2 || !data2.ok) {
-      list.innerHTML = `<div class="empty">${escapeHtml(
-        data2 && data2.error || "\u52A0\u8F7D\u5267\u96C6\u5931\u8D25"
-      )}</div>`;
-      state2.busy = false;
-      return;
-    }
-    state2.subId = subId;
-    state2.title = data2.title || subId;
-    state2.episodes = (data2.episodes || []).map((ep) => ({
-      ...ep,
-      subscriptionId: ep.subscriptionId || subId,
-      showTitle: ep.showTitle || state2.title
-    }));
-    if (titleEl) titleEl.textContent = `${state2.title} \xB7 ${state2.episodes.length} \u96C6`;
-    list.innerHTML = "";
-    if (!state2.episodes.length) {
-      list.innerHTML = '<div class="empty">\u8BE5\u8BA2\u9605\u8FD8\u6CA1\u6709\u5267\u96C6\u7D22\u5F15\u3002\u70B9\u300C\u5237\u65B0\u300D\u91CD\u65B0\u62C9\u53D6\u3002</div>';
-      state2.busy = false;
-      state2.done = true;
-      return;
-    }
-    state2.busy = false;
-    renderNextBatch(body);
-    requestAnimationFrame(() => fillToScroll(body));
-  }
 
   // ui/views/row-events.js
-  async function defaultPlayToggle(ep, row, items) {
+  async function defaultPlayToggle(ep, row, items, opts = {}) {
     const snap = get();
     const songId = episodeSongId(ep);
     const isCurrent = songId != null && snap.current && snap.current.songId === songId;
+    const playOpts = { fromWaitlist: !!opts.fromWaitlist };
     if (isCurrent && snap.phase === "playing") {
       try {
         await pause();
@@ -2857,22 +3751,23 @@
       return;
     }
     if (songId != null) {
-      await playEpisode({ ...episodePayload(ep), songId, showTitle: ep.showTitle }, { resume: true });
+      await playEpisode({ ...episodePayload(ep), songId, showTitle: ep.showTitle }, playOpts);
     } else {
-      await playEpisode(episodePayload(ep));
+      await playEpisode(episodePayload(ep), playOpts);
     }
   }
   function bindRowInteractions(box, items, handlers = {}) {
     if (!box) return;
+    const playOpts = handlers.playOpts || {};
     box.querySelectorAll("[data-title-tap]").forEach((btn) => {
       const idx = Number(btn.getAttribute("data-idx"));
       const ep = items[idx];
       if (!ep) return;
-      btn.addEventListener("click", () => openShowNote(ep));
+      btn.addEventListener("click", () => openShowNote(ep, playOpts));
       btn.addEventListener("keydown", (ev) => {
         if (ev.key === "Enter" || ev.key === " ") {
           ev.preventDefault();
-          openShowNote(ep);
+          openShowNote(ep, playOpts);
         }
       });
     });
@@ -2893,7 +3788,7 @@
       btn.addEventListener("click", async (ev) => {
         ev.stopPropagation();
         if (handlers.play) return handlers.play(ep, idx, btn);
-        await defaultPlayToggle(ep, btn.closest("[data-row]"), items);
+        await defaultPlayToggle(ep, btn.closest("[data-row]"), items, playOpts);
       });
     });
     box.querySelectorAll("[data-act]").forEach((btn) => {
@@ -2973,10 +3868,13 @@
     const sig = recentListSignature(items);
     if (box.dataset.renderSig === sig) return;
     box.dataset.renderSig = sig;
+    box.classList.remove("is-skeleton");
     if (!items.length) {
+      if (box.dataset.bootPending === "1") return;
       box.innerHTML = '<div class="empty">\u8FD8\u6CA1\u6709\u66F4\u65B0\u3002\u5148\u5728\u300C\u8BA2\u9605\u300D\u91CC\u6DFB\u52A0\u9891\u9053\u3002</div>';
       return;
     }
+    delete box.dataset.bootPending;
     const queueIndex = buildQueueIndex(getData().queueSongs);
     const groups = /* @__PURE__ */ new Map();
     items.forEach((ep, idx) => {
@@ -3023,21 +3921,54 @@
       repaintQueueButtons(box, index);
     });
   }
-  function bindRecentToolbar() {
-    const btn = $("btnRecentRefresh");
-    if (!btn) return;
-    btn.addEventListener("click", async () => {
-      btn.disabled = true;
-      try {
-        const r = await api.refreshAll();
-        if (!r.ok && r.skipped) notify("\u5FD9\u788C\u4E2D\uFF0C\u8BF7\u7A0D\u540E", "warn");
-        else notify(r.ok ? "\u5DF2\u5237\u65B0" : "\u90E8\u5206\u5237\u65B0\u5931\u8D25", r.ok ? "ok" : "warn");
+  function requestFeedRefresh({ quietBusy = false } = {}) {
+    if (isFeedRefreshing()) return Promise.resolve({ noop: true });
+    return runFeedRefresh({
+      refreshAll: () => wrapRefreshCall(() => api.refreshAll()),
+      afterRefresh: async (r) => {
+        if (!r || r.noop) return;
+        if (!r.ok && (r.skipped || isSkippedBusy(r))) {
+          if (!quietBusy) notify(REFRESH_BUSY_TOAST, "warn");
+          await trackRemoteRefreshBusy(api);
+          return;
+        }
+        if (r.started) {
+          const wait = await waitUntilFeedRefreshIdle(api);
+          if (wait.timedOut) {
+            if (!quietBusy) notify(REFRESH_STILL_RUNNING_TOAST, "warn");
+            return;
+          }
+        }
         await reloadRecent();
         await reloadSubs();
+        markFeedSynced();
+        if (!quietBusy && r.ok === false && !r.started && !isSkippedBusy(r)) {
+          notify(humanizeRefreshFailure(r, "\u90E8\u5206\u5237\u65B0\u5931\u8D25"), "warn");
+        }
+      }
+    });
+  }
+  function bindRecentToolbar() {
+    const btn = $("btnRecentRefresh");
+    const hint = $("recentRefreshHint");
+    if (!btn) return;
+    onFeedRefreshState((busy) => {
+      applyRefreshButtonBusy(btn, busy);
+      applyRefreshHint(hint, busy);
+    });
+    btn.addEventListener("click", async () => {
+      if (isFeedRefreshing()) return;
+      try {
+        const r = await requestFeedRefresh({ quietBusy: false });
+        if (r && r.noop) return;
+        renderRecent();
       } catch (e) {
-        notify(String(e), "err");
-      } finally {
-        btn.disabled = false;
+        if (isSkippedBusy(e)) {
+          notify(REFRESH_BUSY_TOAST, "warn");
+          void trackRemoteRefreshBusy(api);
+          return;
+        }
+        notify(humanizeRefreshFailure(e), "err");
       }
     });
   }
@@ -3136,13 +4067,59 @@
     }
   }
 
+  // ui/lib/addSubForm.js
+  function resetOpmlImport(els = {}, pending = null) {
+    if (pending && typeof pending === "object") pending.opmlText = null;
+    if (els.opmlText) els.opmlText.value = "";
+    if (els.opmlFile) els.opmlFile.value = "";
+    if (els.opmlSummary) els.opmlSummary.textContent = "";
+    if (els.importBtn) els.importBtn.disabled = true;
+    return { reset: true };
+  }
+  function closeAddSubForm(els = {}, pending = null) {
+    resetOpmlImport(els, pending);
+    if (els.feedUrl) els.feedUrl.value = "";
+    const card = els.card;
+    if (card) {
+      if (typeof card.setAttribute === "function") card.setAttribute("hidden", "");
+      if (card.classList && typeof card.classList.toggle === "function") {
+        card.classList.toggle("hidden", true);
+      }
+    }
+    return { closed: true };
+  }
+
   // ui/views/subs.js
   var subQuery = "";
   var pendingState = { opmlText: null };
+  var selectState = { mode: false, keys: /* @__PURE__ */ new Set() };
+  function syncSubsSelectUi() {
+    const bar = $("subsSelectBar");
+    const del2 = $("btnSubsDeleteSelected");
+    const count = $("subsSelectCount");
+    const toggle = $("btnSubsSelect");
+    setHidden(bar, !selectState.mode);
+    if (del2) del2.disabled = selectState.keys.size === 0;
+    if (count) {
+      count.textContent = selectState.mode ? selectState.keys.size ? `\u5DF2\u9009 ${selectState.keys.size} \u4E2A` : "\u70B9\u9009\u8BA2\u9605" : "";
+    }
+    if (toggle) {
+      toggle.classList.toggle("is-on", selectState.mode);
+      toggle.setAttribute("aria-pressed", selectState.mode ? "true" : "false");
+      toggle.title = selectState.mode ? "\u9000\u51FA\u591A\u9009" : "\u591A\u9009";
+      setButtonIcon(toggle, "listChecks", 16);
+    }
+  }
+  function setSubsSelectMode(on) {
+    selectState.mode = !!on;
+    if (!on) selectState.keys.clear();
+    syncSubsSelectUi();
+    renderSubs();
+  }
   function subCoverHtml(sub) {
     const abs = absoluteCoverUrl(sub.coverUrl);
     if (abs) {
-      return `<img class="sub-card__cover" src="${escapeHtml(abs)}" alt="" loading="lazy" />`;
+      return `<img class="sub-card__cover" src="${escapeHtml(abs)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`;
     }
     const letter = String(sub.title || "?").trim().charAt(0).toUpperCase() || "?";
     return `<div class="sub-card__cover cover-ph" style="background:${colorFromString(sub.title || "")}">${escapeHtml(letter)}</div>`;
@@ -3154,31 +4131,44 @@
     if (!all.length) {
       box.innerHTML = '<div class="empty">\u8FD8\u6CA1\u6709\u8BA2\u9605\u3002\u70B9\u53F3\u4E0A\u89D2\u300C+\u300D\u7C98\u8D34 RSS URL \u6216\u5BFC\u5165 OPML\u3002</div>';
       syncSubClear();
+      syncSubsSelectUi();
       return;
     }
     const list = subQuery.trim() ? all.filter((s) => matchesQuery(s.title, subQuery) || matchesQuery(s.url, subQuery)) : all;
     if (!list.length) {
       box.innerHTML = `<div class="empty">\u6CA1\u6709\u5339\u914D\u300C${escapeHtml(subQuery)}\u300D\u7684\u9891\u9053\u3002</div>`;
       syncSubClear();
+      syncSubsSelectUi();
       return;
     }
     box.innerHTML = list.map((s, idx) => {
-      const err = s.lastError ? `<div class="sub-card__err">\u6700\u8FD1\u9519\u8BEF\uFF1A${escapeHtml(s.lastError)}</div>` : "";
-      const meta = [
-        // Not an error: it only means the feed publishes more than our index
-        // depth, and we keep the newest N.
-        `<span title="\u8BE5 feed \u7684\u5267\u96C6\u6570\u8D85\u8FC7\u672C\u5730\u7D22\u5F15\u6DF1\u5EA6\uFF0C\u53EA\u4FDD\u7559\u6700\u8FD1\u82E5\u5E72\u96C6">\u5267\u96C6 ${Number(
-          s.episodeCount
-        ) || 0}${s.truncated ? "\uFF08\u5DF2\u8FBE\u7D22\u5F15\u4E0A\u9650\uFF09" : ""}</span>`,
-        `<span>\u4E0A\u6B21\u6210\u529F ${escapeHtml(fmtTime(s.lastSuccessAt))}</span>`
-      ].join("");
-      const more = moreMenuHtml(
+      const selected = selectState.keys.has(s.id);
+      const lead = selectState.mode ? `<input type="checkbox" class="sel-box" data-sel-key="${escapeHtml(s.id)}" ${selected ? "checked" : ""} aria-label="\u9009\u62E9\u8BA2\u9605" />` : "";
+      const author = typeof s.author === "string" ? s.author.trim() : "";
+      const authorHtml = author ? `<div class="sub-card__author">${escapeHtml(author)}</div>` : "";
+      const more = selectState.mode ? "" : moreMenuHtml(
         [
-          { key: "refresh", label: "\u5237\u65B0", iconName: "rotateCcw", attrs: `data-idx="${idx}"` },
-          { key: "queue-show", label: "\u52A0\u5165\u64AD\u653E\u5217\u8868", iconName: "listPlus", attrs: `data-idx="${idx}"` },
+          {
+            key: "refresh",
+            label: isFeedRefreshing() ? REFRESH_MENU_BUSY_LABEL : REFRESH_MENU_IDLE_LABEL,
+            iconName: "rotateCcw",
+            attrs: `data-idx="${idx}"`
+          },
+          {
+            key: "index-history",
+            label: "\u7D22\u5F15\u5386\u53F2",
+            iconName: "history",
+            attrs: `data-idx="${idx}"`
+          },
+          {
+            key: "copy-url",
+            label: "\u590D\u5236\u6E90\u5730\u5740",
+            iconName: "copy",
+            attrs: `data-idx="${idx}"`
+          },
           {
             key: "delete",
-            label: "\u5220\u9664\u8BA2\u9605",
+            label: "\u53D6\u6D88\u8BA2\u9605",
             iconName: "trash",
             danger: true,
             attrs: `data-idx="${idx}"`
@@ -3186,17 +4176,55 @@
         ],
         "sub-" + s.id
       );
-      return `<div class="sub-card" data-sub-card data-idx="${idx}">` + subCoverHtml(s) + `<div class="sub-card__body"><div class="sub-card__title">${escapeHtml(s.title || s.url)}</div><div class="sub-card__meta">${meta}</div><div class="sub-card__url" title="${escapeHtml(s.url)}">${escapeHtml(s.url)}</div>` + err + `<div class="sub-card__actions"><button type="button" class="chip-btn" data-sub-act="eps" data-idx="${idx}"><span data-icon="listMusic" data-size="14"></span><span>\u5267\u96C6</span></button>` + more + `</div></div></div>`;
+      return `<div class="sub-card${selectState.mode ? " select-mode" : ""}${selected ? " is-selected" : ""}" data-sub-card data-sub-id="${escapeHtml(s.id)}" data-idx="${idx}" role="button" tabindex="0">` + lead + subCoverHtml(s) + `<div class="sub-card__body"><div class="sub-card__title">${escapeHtml(s.title || s.url)}</div>` + authorHtml + `</div>` + more + `</div>`;
     }).join("");
+    if (selectState.mode) {
+      box.querySelectorAll("input[data-sel-key]").forEach((input) => {
+        input.addEventListener("click", (ev) => ev.stopPropagation());
+        input.addEventListener("change", () => {
+          const key = input.getAttribute("data-sel-key");
+          if (!key) return;
+          if (input.checked) selectState.keys.add(key);
+          else selectState.keys.delete(key);
+          const card = input.closest(".sub-card");
+          if (card) card.classList.toggle("is-selected", input.checked);
+          syncSubsSelectUi();
+        });
+      });
+      box.querySelectorAll("[data-sub-card]").forEach((card) => {
+        card.addEventListener("click", (ev) => {
+          if (ev.target instanceof Element && ev.target.closest("input")) return;
+          const input = card.querySelector("input[data-sel-key]");
+          if (!input) return;
+          input.checked = !input.checked;
+          const key = input.getAttribute("data-sel-key");
+          if (!key) return;
+          if (input.checked) selectState.keys.add(key);
+          else selectState.keys.delete(key);
+          card.classList.toggle("is-selected", input.checked);
+          syncSubsSelectUi();
+        });
+      });
+      syncSubClear();
+      syncSubsSelectUi();
+      return;
+    }
     box.querySelectorAll(".sub-card").forEach((card) => {
       const idx = Number(card.getAttribute("data-idx"));
       const sub = list[idx];
       if (!sub) return;
-      card.querySelectorAll("[data-sub-act]").forEach((btn) => {
-        btn.addEventListener("click", async (ev) => {
-          ev.stopPropagation();
-          await openEpisodes(sub.id);
-        });
+      const open = () => {
+        void openEpisodes(sub.id);
+      };
+      card.addEventListener("click", (ev) => {
+        if (ev.target instanceof Element && ev.target.closest(".more-wrap, input")) return;
+        open();
+      });
+      card.addEventListener("keydown", (ev) => {
+        if (ev.key !== "Enter" && ev.key !== " ") return;
+        if (ev.target instanceof Element && ev.target.closest(".more-wrap, input")) return;
+        ev.preventDefault();
+        open();
       });
       card.querySelectorAll("[data-more-toggle]").forEach((btn) => {
         btn.addEventListener("click", (ev) => {
@@ -3210,37 +4238,70 @@
           ev.stopPropagation();
           closePopovers();
           if (act === "refresh") {
+            if (isFeedRefreshing()) return;
+            try {
+              const r = await runFeedRefreshOne({
+                refreshOne: () => api.refreshOne(sub.id),
+                afterRefresh: async (result) => {
+                  if (!result || result.noop) return;
+                  if (!result.ok && (result.skipped || isSkippedBusy(result))) {
+                    notify(REFRESH_BUSY_TOAST, "warn");
+                    await trackRemoteRefreshBusy(api);
+                    return;
+                  }
+                  if (result.ok) {
+                    notify("\u5DF2\u5237\u65B0\uFF08\u672A\u6539\u64AD\u653E\u5217\u8868\uFF09", "ok");
+                    await reloadSubs();
+                    renderSubs();
+                  } else {
+                    notify(humanizeRefreshFailure(result), "err");
+                  }
+                }
+              });
+              if (r && r.noop) return;
+            } catch (e) {
+              if (isSkippedBusy(e)) {
+                notify(REFRESH_BUSY_TOAST, "warn");
+                void trackRemoteRefreshBusy(api);
+                return;
+              }
+              notify(humanizeRefreshFailure(e), "err");
+            }
+          } else if (act === "index-history") {
             btn.disabled = true;
             try {
-              const r = await api.refreshOne(sub.id);
-              notify(r.ok ? "\u5DF2\u5237\u65B0\uFF08\u672A\u6539\u64AD\u653E\u5217\u8868\uFF09" : r.error || "\u5237\u65B0\u5931\u8D25", r.ok ? "ok" : "err");
+              notify("\u6B63\u5728\u7D22\u5F15\u8BE5\u9891\u9053\u7684\u5386\u53F2\u8282\u76EE\u2026", "muted");
+              const r = await api.indexHistory(sub.id);
+              if (r && r.alreadyRunning) {
+                notify("\u8BE5\u9891\u9053\u6B63\u5728\u7D22\u5F15\uFF0C\u8BF7\u7A0D\u5019", "warn");
+                return;
+              }
+              if (!r || !r.ok) {
+                notify(r && (r.error || r.historyIndexError) || "\u7D22\u5F15\u5931\u8D25", "err");
+                return;
+              }
+              notify("\u5DF2\u6309\u6E90\u91CC\u73B0\u6709\u8282\u76EE\u6536\u5F55\uFF0C\u66F4\u65E9\u7684\u65E0\u6CD5\u627E\u56DE\u3002", "ok");
               await reloadSubs();
               renderSubs();
+            } catch (e) {
+              notify(String(e), "err");
             } finally {
               btn.disabled = false;
             }
-          } else if (act === "queue-show") {
-            btn.disabled = true;
-            try {
-              const r = await api.queueAddShow(sub.id);
-              notify(
-                r.ok ? `\u5DF2\u8FFD\u52A0 ${r.added} \u9996\u5230\u300C${r.playlistName}\u300D` : r.error || "\u52A0\u5165\u5931\u8D25",
-                r.ok ? "ok" : "err"
-              );
-              await reloadQueue();
-            } finally {
-              btn.disabled = false;
-            }
+          } else if (act === "copy-url") {
+            const ok = await copyText(String(sub.url || ""));
+            if (ok) notify("\u5DF2\u590D\u5236\u6E90\u5730\u5740", "ok");
+            else notify("\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u624B\u52A8\u9009\u62E9\u5730\u5740\u590D\u5236", "warn");
           } else if (act === "delete") {
             const ok = await uiConfirm({
-              title: "\u5220\u9664\u8BA2\u9605",
-              message: "\u5220\u9664\u8BE5\u8BA2\u9605\u7BA1\u7406\u9879\uFF1F\u64AD\u653E\u5217\u8868\u4E0E\u8FDB\u5EA6\u4E0D\u4F1A\u81EA\u52A8\u6E05\u9664\u3002",
-              okText: "\u5220\u9664",
+              title: "\u53D6\u6D88\u8BA2\u9605",
+              message: "\u53D6\u6D88\u540E\u8BE5\u9891\u9053\u5C06\u4ECE\u8BA2\u9605\u5217\u8868\u79FB\u9664\u3002\u64AD\u653E\u5217\u8868\u4E0E\u8FDB\u5EA6\u4E0D\u4F1A\u81EA\u52A8\u6E05\u9664\u3002",
+              okText: "\u53D6\u6D88\u8BA2\u9605",
               danger: true
             });
             if (!ok) return;
             await api.deleteSubscription(sub.id);
-            notify("\u5DF2\u5220\u9664\u8BA2\u9605", "ok");
+            notify("\u5DF2\u53D6\u6D88\u8BA2\u9605", "ok");
             await reloadSubs();
             renderSubs();
           }
@@ -3248,6 +4309,7 @@
       });
     });
     syncSubClear();
+    syncSubsSelectUi();
   }
   function syncSubClear() {
     const clear = $("subSearchClear");
@@ -3257,6 +4319,9 @@
     await openChannelDialog(id);
   }
   function bindSubsToolbar() {
+    onFeedRefreshState((busy) => {
+      applyRefreshMenuBusy(document.getElementById("subList") || document, busy);
+    });
     const input = $("subSearch");
     const clear = $("subSearchClear");
     if (input) {
@@ -3273,20 +4338,42 @@
         if (input) input.focus();
       });
     }
-    const btnRefreshAll = $("btnRefreshAll");
-    if (btnRefreshAll) {
-      btnRefreshAll.addEventListener("click", async () => {
-        btnRefreshAll.disabled = true;
+    const selectBtn = $("btnSubsSelect");
+    if (selectBtn) {
+      selectBtn.addEventListener("click", () => setSubsSelectMode(!selectState.mode));
+    }
+    const selectCancel = $("btnSubsSelectCancel");
+    if (selectCancel) {
+      selectCancel.addEventListener("click", () => setSubsSelectMode(false));
+    }
+    const deleteSelected = $("btnSubsDeleteSelected");
+    if (deleteSelected) {
+      deleteSelected.addEventListener("click", async () => {
+        const ids = Array.from(selectState.keys);
+        if (!ids.length) return;
+        const ok = await uiConfirm({
+          title: "\u5220\u9664\u6240\u9009\u8BA2\u9605",
+          message: `\u5220\u9664\u9009\u4E2D\u7684 ${ids.length} \u4E2A\u8BA2\u9605\u7BA1\u7406\u9879\uFF1F\u64AD\u653E\u5217\u8868\u4E0E\u8FDB\u5EA6\u4E0D\u4F1A\u81EA\u52A8\u6E05\u9664\u3002`,
+          okText: "\u5220\u9664",
+          danger: true
+        });
+        if (!ok) return;
+        deleteSelected.disabled = true;
         try {
-          const r = await api.refreshAll();
-          if (!r.ok && r.skipped) notify("\u5FD9\u788C\u4E2D\uFF0C\u8BF7\u7A0D\u540E", "warn");
-          else notify(r.ok ? "\u5168\u90E8\u5237\u65B0\u5B8C\u6210\uFF08\u672A\u6539\u64AD\u653E\u5217\u8868\uFF09" : "\u90E8\u5206\u5237\u65B0\u5931\u8D25\uFF0C\u5DF2\u4FDD\u7559\u65E7\u6570\u636E", r.ok ? "ok" : "warn");
+          const r = await api.batchDeleteSubscriptions(ids);
+          if (!r.ok) {
+            notify(r.error || "\u5220\u9664\u5931\u8D25", "err");
+            return;
+          }
+          notify(r.tip || `\u5DF2\u5220\u9664 ${r.removedCount || ids.length} \u6761\u8BA2\u9605`, "ok");
+          selectState.keys.clear();
+          setSubsSelectMode(false);
           await reloadSubs();
           renderSubs();
         } catch (e) {
           notify(String(e), "err");
         } finally {
-          btnRefreshAll.disabled = false;
+          syncSubsSelectUi();
         }
       });
     }
@@ -3294,6 +4381,19 @@
     if (btnExport) btnExport.addEventListener("click", exportOpml);
     const btnOpenAdd = $("btnOpenAddSub");
     const addCard = $("addSubCard");
+    function closeAddSubCard() {
+      closeAddSubForm(
+        {
+          card: addCard,
+          feedUrl: $("feedUrl"),
+          opmlText: $("opmlText"),
+          opmlFile: $("opmlFile"),
+          opmlSummary: $("opmlSummary"),
+          importBtn: $("btnOpmlImport")
+        },
+        pendingState
+      );
+    }
     if (btnOpenAdd && addCard) {
       btnOpenAdd.addEventListener("click", () => {
         setHidden(addCard, false);
@@ -3303,7 +4403,19 @@
     }
     const btnCloseAdd = $("btnCloseAddSub");
     if (btnCloseAdd && addCard) {
-      btnCloseAdd.addEventListener("click", () => setHidden(addCard, true));
+      btnCloseAdd.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        closeAddSubCard();
+      });
+    }
+    const btnCancelAdd = $("btnCancelAddSub");
+    if (btnCancelAdd && addCard) {
+      btnCancelAdd.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        closeAddSubCard();
+      });
     }
     const btnAdd = $("btnAdd");
     if (btnAdd) {
@@ -3320,6 +4432,7 @@
           else {
             notify(r.already ? "\u5DF2\u5B58\u5728\uFF0C\u5DF2\u5237\u65B0\u7D22\u5F15" : "\u5DF2\u6DFB\u52A0\u5E76\u62C9\u53D6\u7D22\u5F15", "ok");
             $("feedUrl").value = "";
+            closeAddSubCard();
             await reloadSubs();
             await renderSubs();
           }
@@ -3330,9 +4443,10 @@
         }
       });
     }
-    bindOpmlControls();
+    bindOpmlControls({ closeAddSubCard });
   }
-  function bindOpmlControls() {
+  function bindOpmlControls(hooks = {}) {
+    const closeAddSubCard = typeof hooks.closeAddSubCard === "function" ? hooks.closeAddSubCard : null;
     const file = $("opmlFile");
     if (file) {
       file.addEventListener("change", async () => {
@@ -3371,29 +4485,38 @@
     if (imp) {
       imp.addEventListener("click", async () => {
         if (!pendingState.opmlText) return;
+        imp.disabled = true;
         try {
           const r = await api.opmlImport(pendingState.opmlText);
           if (!r.ok) notify(r.error || "\u5BFC\u5165\u5931\u8D25", "err");
           else {
             notify(r.tip || "\u5BFC\u5165\u5B8C\u6210", "ok");
             pendingState.opmlText = null;
-            imp.disabled = true;
+            if (closeAddSubCard) closeAddSubCard();
             await reloadSubs();
             renderSubs();
           }
         } catch (e) {
           notify(String(e), "err");
+        } finally {
+          if (pendingState.opmlText) imp.disabled = false;
         }
       });
     }
     const cancel = $("btnOpmlCancel");
     if (cancel) {
-      cancel.addEventListener("click", () => {
-        pendingState.opmlText = null;
-        $("btnOpmlImport").disabled = true;
-        $("opmlSummary").textContent = "";
-        $("opmlText").value = "";
-        $("opmlFile").value = "";
+      cancel.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        resetOpmlImport(
+          {
+            opmlText: $("opmlText"),
+            opmlFile: $("opmlFile"),
+            opmlSummary: $("opmlSummary"),
+            importBtn: $("btnOpmlImport")
+          },
+          pendingState
+        );
       });
     }
   }
@@ -3449,12 +4572,9 @@
               const area2 = document.getElementById("opmlExportText");
               if (!area2) return false;
               area2.select();
-              try {
-                await navigator.clipboard.writeText(area2.value);
-                notify("\u5DF2\u590D\u5236\u5230\u526A\u8D34\u677F", "ok");
-              } catch (_) {
-                notify("\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u624B\u52A8\u9009\u62E9\u590D\u5236", "warn");
-              }
+              const ok = await copyText(area2.value);
+              if (ok) notify("\u5DF2\u590D\u5236\u5230\u526A\u8D34\u677F", "ok");
+              else notify("\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u624B\u52A8\u9009\u62E9\u590D\u5236", "warn");
               return false;
             }
           },
@@ -3469,9 +4589,434 @@
     }
   }
 
+  // ui/lib/queueDrag.js
+  var FRONT_LOCKED_LABEL = "\u6B63\u5728\u64AD\u653E\uFF0C\u4E0D\u80FD\u62D6\u52A8\u6392\u5E8F";
+  var FRONT_CLAMPED_PLAYING = "\u6B63\u5728\u64AD\u653E\uFF0C\u5DF2\u6392\u5230\u4E0B\u4E00\u9996\u3002";
+  var FRONT_CLAMPED_PAUSED = "\u5F53\u524D\u4E00\u96C6\u4ECD\u5728\u7B2C\u4E00\u4F4D\uFF0C\u5DF2\u6392\u5230\u4E0B\u4E00\u9996\u3002";
+  var FRONT_MOVED_TO_FIRST = "\u5DF2\u6392\u5230\u7B2C\u4E00\u4F4D";
+  function createFrontClampHint() {
+    let hinted = false;
+    return {
+      /** @returns {string|null} */
+      take(clamped, phase) {
+        if (!clamped || hinted) return null;
+        hinted = true;
+        return phase === "paused" ? FRONT_CLAMPED_PAUSED : FRONT_CLAMPED_PLAYING;
+      },
+      wasShown() {
+        return hinted;
+      },
+      reset() {
+        hinted = false;
+      }
+    };
+  }
+  function resolvePlayheadLock({
+    songIds,
+    currentSongId: currentSongId2,
+    phase,
+    podcastPlaylistId,
+    sourcePlaylistId
+  } = {}) {
+    const ids = (Array.isArray(songIds) ? songIds : []).map(Number).filter(Number.isFinite);
+    const cur = Number(currentSongId2);
+    const ph = phase || null;
+    if (ph !== "playing" && ph !== "paused") {
+      return { lockedSongId: null, needsRepair: false, phase: ph };
+    }
+    if (!Number.isFinite(cur) || cur <= 0) {
+      return { lockedSongId: null, needsRepair: false, phase: ph };
+    }
+    const want = Number(podcastPlaylistId);
+    const have = Number(sourcePlaylistId);
+    if (!Number.isFinite(want) || want <= 0) {
+      return { lockedSongId: null, needsRepair: false, phase: ph };
+    }
+    if (!Number.isFinite(have) || have !== want) {
+      return { lockedSongId: null, needsRepair: false, phase: ph };
+    }
+    const idx = ids.indexOf(cur);
+    if (idx < 0) {
+      return { lockedSongId: null, needsRepair: false, phase: ph };
+    }
+    return { lockedSongId: cur, needsRepair: idx !== 0, phase: ph };
+  }
+  function planPinSongToFront(ids, songId) {
+    const list = (Array.isArray(ids) ? ids : []).map(Number).filter(Number.isFinite);
+    const id = Number(songId);
+    const from = list.indexOf(id);
+    if (from < 0 || from === 0) return null;
+    const next = list.slice();
+    next.splice(from, 1);
+    next.unshift(id);
+    return next;
+  }
+  function normalizeLockedId(lockedSongId) {
+    const locked = Number(lockedSongId);
+    return Number.isFinite(locked) && locked > 0 ? locked : null;
+  }
+  function canDragQueueRow(fromId, lockedSongId) {
+    const from = Number(fromId);
+    if (!Number.isFinite(from)) return false;
+    const locked = normalizeLockedId(lockedSongId);
+    return !(locked && from === locked);
+  }
+  function planReorderResult(ids, fromId, toId, lockedSongId) {
+    const list = (Array.isArray(ids) ? ids : []).map(Number).filter(Number.isFinite);
+    const from = Number(fromId);
+    const to = Number(toId);
+    const locked = normalizeLockedId(lockedSongId);
+    if (!Number.isFinite(from) || !Number.isFinite(to) || from === to) {
+      return { next: null, clampedToNext: false, blocked: false };
+    }
+    if (locked && from === locked) {
+      return { next: null, clampedToNext: false, blocked: true };
+    }
+    const fromIndex = list.indexOf(from);
+    if (fromIndex < 0 || list.indexOf(to) < 0) {
+      return { next: null, clampedToNext: false, blocked: false };
+    }
+    const next = list.slice();
+    const [moved] = next.splice(fromIndex, 1);
+    let insertAt = next.indexOf(to);
+    if (insertAt < 0) return { next: null, clampedToNext: false, blocked: false };
+    let clampedToNext = false;
+    if (locked) {
+      if (to === locked) {
+        insertAt = Math.min(Math.max(1, next.indexOf(locked) + 1), next.length);
+        clampedToNext = true;
+      }
+      if (insertAt < 1) {
+        insertAt = Math.min(1, next.length);
+        clampedToNext = true;
+      }
+    }
+    next.splice(insertAt, 0, moved);
+    if (next.length === list.length && next.every((id, i) => id === list[i])) {
+      return { next: null, clampedToNext, blocked: false };
+    }
+    return { next, clampedToNext, blocked: false };
+  }
+  function useHtml5RowDrag({ pointerFine = false, mobile = false } = {}) {
+    return !!pointerFine && !mobile;
+  }
+  function clamp(n, min, max) {
+    return Math.max(min, Math.min(max, n));
+  }
+  function rowSlotsFromBoxes(boxes) {
+    const list = (Array.isArray(boxes) ? boxes : []).map((b) => ({
+      id: Number(b && b.id),
+      top: Number(b && b.top),
+      bottom: Number(b && b.bottom)
+    })).filter((b) => Number.isFinite(b.id) && Number.isFinite(b.top) && Number.isFinite(b.bottom));
+    return list.map((b, i) => {
+      const height = b.bottom - b.top;
+      const stride = i < list.length - 1 ? list[i + 1].top - b.top : i > 0 ? b.top - list[i - 1].top : height;
+      return { ...b, height, slot: stride > 0 ? stride : height };
+    });
+  }
+  function scrollAdjustedSlots(slots, scrollDelta) {
+    const delta = Number(scrollDelta) || 0;
+    return (Array.isArray(slots) ? slots : []).map((s) => ({
+      ...s,
+      top: s.top - delta,
+      bottom: s.bottom - delta
+    }));
+  }
+  function followTranslate(startX, startY, x, y, { maxX = 56, scrollDelta = 0 } = {}) {
+    return {
+      x: clamp((Number(x) || 0) - (Number(startX) || 0), -maxX, maxX),
+      y: (Number(y) || 0) - (Number(startY) || 0) + (Number(scrollDelta) || 0)
+    };
+  }
+  function targetIndexForCenter(slots, fromId, centerY, lockedSongId) {
+    const list = Array.isArray(slots) ? slots : [];
+    const fromIndex = list.findIndex((s) => s.id === Number(fromId));
+    if (fromIndex < 0 || !Number.isFinite(centerY)) return Math.max(0, fromIndex);
+    let insert = 0;
+    for (const s of list) {
+      if (s.id === Number(fromId)) continue;
+      if (centerY > s.top + s.height / 2) insert += 1;
+    }
+    if (normalizeLockedId(lockedSongId) && insert < 1) insert = 1;
+    return insert;
+  }
+  function planReorderToIndex(ids, fromId, toIndex, lockedSongId) {
+    const list = (Array.isArray(ids) ? ids : []).map(Number).filter(Number.isFinite);
+    const from = Number(fromId);
+    const fromIndex = list.indexOf(from);
+    if (fromIndex < 0) return null;
+    const locked = normalizeLockedId(lockedSongId);
+    if (locked && from === locked) return null;
+    let dest = clamp(Math.round(Number(toIndex)), 0, Math.max(0, list.length - 1));
+    if (locked && dest < 1) dest = Math.min(1, Math.max(0, list.length - 1));
+    if (dest === fromIndex) return null;
+    const next = list.slice();
+    const [moved] = next.splice(fromIndex, 1);
+    next.splice(dest, 0, moved);
+    if (next.every((id, i) => id === list[i])) return null;
+    return next;
+  }
+  function shiftMapForMove(slots, fromId, toIndex) {
+    const list = Array.isArray(slots) ? slots : [];
+    const fromIndex = list.findIndex((s) => s.id === Number(fromId));
+    if (fromIndex < 0) return [];
+    const dest = clamp(Math.round(Number(toIndex)), 0, Math.max(0, list.length - 1));
+    const lifted = list[fromIndex].slot;
+    return list.map((s, i) => {
+      if (i === fromIndex) return { id: s.id, y: 0, isDragged: true };
+      let y = 0;
+      if (fromIndex < dest && i > fromIndex && i <= dest) y = -lifted;
+      else if (dest < fromIndex && i >= dest && i < fromIndex) y = lifted;
+      return { id: s.id, y, isDragged: false };
+    });
+  }
+  function settleTranslate(slots, fromId, toIndex) {
+    const list = Array.isArray(slots) ? slots : [];
+    const fromIndex = list.findIndex((s) => s.id === Number(fromId));
+    if (fromIndex < 0 || !list.length) return { x: 0, y: 0 };
+    const dest = clamp(Math.round(Number(toIndex)), 0, list.length - 1);
+    const originTop = list[fromIndex].top;
+    const ids = list.map((s) => s.id);
+    const order = planReorderToIndex(ids, fromId, dest) || ids;
+    let top = list[0].top;
+    for (const id of order) {
+      if (id === Number(fromId)) break;
+      const row = list.find((s) => s.id === id);
+      top += row ? row.slot : 0;
+    }
+    return { x: 0, y: top - originTop };
+  }
+  function planPointerMotion({
+    slots,
+    fromId,
+    startX,
+    startY,
+    x,
+    y,
+    maxX = 56,
+    scrollDelta = 0,
+    lockedSongId
+  } = {}) {
+    const follow = followTranslate(startX, startY, x, y, { maxX, scrollDelta });
+    const from = (Array.isArray(slots) ? slots : []).find((s) => s.id === Number(fromId));
+    const centerY = from ? from.top + from.height / 2 + follow.y : Number(y) || 0;
+    const rawIndex = targetIndexForCenter(slots, fromId, centerY);
+    const toIndex = targetIndexForCenter(slots, fromId, centerY, lockedSongId);
+    const clampedToNext = !!(normalizeLockedId(lockedSongId) && rawIndex < 1 && toIndex >= 1);
+    const shifts = shiftMapForMove(slots, fromId, toIndex);
+    const settle = settleTranslate(slots, fromId, toIndex);
+    const nextIds = planReorderToIndex(
+      (Array.isArray(slots) ? slots : []).map((s) => s.id),
+      fromId,
+      toIndex,
+      lockedSongId
+    );
+    return { fromId: Number(fromId), follow, toIndex, shifts, settle, nextIds, clampedToNext };
+  }
+  function autoScrollDelta({
+    pointerY,
+    viewTop,
+    viewBottom,
+    scrollTop,
+    scrollHeight,
+    clientHeight,
+    edge = 40,
+    step = 14
+  } = {}) {
+    const maxScroll = Math.max(0, (Number(scrollHeight) || 0) - (Number(clientHeight) || 0));
+    const top = Number(scrollTop) || 0;
+    if (maxScroll <= 0 || !Number.isFinite(pointerY)) return 0;
+    const edgeSize = Math.max(1, Number(edge) || 40);
+    const maxStep = Math.max(1, Number(step) || 14);
+    let delta = 0;
+    if (pointerY < viewTop + edgeSize) {
+      const t = (viewTop + edgeSize - pointerY) / edgeSize;
+      delta = -Math.ceil(maxStep * clamp(t, 0.25, 1));
+    } else if (pointerY > viewBottom - edgeSize) {
+      const t = (pointerY - (viewBottom - edgeSize)) / edgeSize;
+      delta = Math.ceil(maxStep * clamp(t, 0.25, 1));
+    }
+    if (!delta) return 0;
+    const next = clamp(top + delta, 0, maxScroll);
+    return next - top;
+  }
+  function settleDurationMs(reducedMotion) {
+    return reducedMotion ? 0 : 180;
+  }
+  function planPinToFrontMotion(slots, songId) {
+    const list = Array.isArray(slots) ? slots : [];
+    const fromId = Number(songId);
+    const fromIndex = list.findIndex((s) => s.id === fromId);
+    if (fromIndex < 0) return { kind: "insert", fromId, fromIndex: -1, toIndex: 0 };
+    if (fromIndex === 0) {
+      return {
+        kind: "already-first",
+        fromId,
+        fromIndex: 0,
+        toIndex: 0,
+        follow: { x: 0, y: 0 },
+        shifts: [],
+        settle: { x: 0, y: 0 }
+      };
+    }
+    return {
+      kind: "move",
+      fromId,
+      fromIndex,
+      toIndex: 0,
+      follow: { x: 0, y: 0 },
+      shifts: shiftMapForMove(list, fromId, 0),
+      settle: settleTranslate(list, fromId, 0)
+    };
+  }
+  function createQueuePointerDrag(opts = {}) {
+    const threshold = Number.isFinite(Number(opts.threshold)) ? Number(opts.threshold) : 8;
+    let session = null;
+    let restSlots = null;
+    let restScrollTop = 0;
+    function scrollTopNow() {
+      return typeof opts.getScrollTop === "function" ? Number(opts.getScrollTop()) || 0 : 0;
+    }
+    function currentSlots() {
+      if (restSlots) return scrollAdjustedSlots(restSlots, scrollTopNow() - restScrollTop);
+      return rowSlotsFromBoxes(typeof opts.getRows === "function" ? opts.getRows() || [] : []);
+    }
+    function motionAt(x, y) {
+      if (!session) return null;
+      const locked = typeof opts.getLockedSongId === "function" ? opts.getLockedSongId() : opts.lockedSongId;
+      return planPointerMotion({
+        slots: currentSlots(),
+        fromId: session.fromId,
+        startX: session.startX,
+        startY: session.startY,
+        x,
+        y,
+        maxX: opts.maxX,
+        scrollDelta: scrollTopNow() - restScrollTop,
+        lockedSongId: locked
+      });
+    }
+    function clear(info) {
+      const had = session;
+      session = null;
+      restSlots = null;
+      restScrollTop = 0;
+      if (had && had.started && typeof opts.onDragEnd === "function") opts.onDragEnd(info || {});
+    }
+    return {
+      isActive() {
+        return !!(session && (session.started || session.settling));
+      },
+      onPointerDown(ev, fromId) {
+        const id = Number(fromId);
+        if (!Number.isFinite(id) || !ev) return;
+        const locked = typeof opts.getLockedSongId === "function" ? opts.getLockedSongId() : opts.lockedSongId;
+        if (!canDragQueueRow(id, locked)) return;
+        session = {
+          fromId: id,
+          pointerId: ev.pointerId,
+          startX: ev.clientX ?? 0,
+          startY: ev.clientY ?? 0,
+          lastX: ev.clientX ?? 0,
+          lastY: ev.clientY ?? 0,
+          started: false,
+          settling: false
+        };
+      },
+      onPointerMove(ev) {
+        if (!session || ev && ev.pointerId != null && ev.pointerId !== session.pointerId) return;
+        const x = ev && ev.clientX != null ? ev.clientX : session.lastX;
+        const y = ev && ev.clientY != null ? ev.clientY : session.lastY;
+        session.lastX = x;
+        session.lastY = y;
+        if (!session.started) {
+          if (Math.hypot(x - session.startX, y - session.startY) < threshold) return;
+          session.started = true;
+          restSlots = currentSlots();
+          restScrollTop = scrollTopNow();
+          if (typeof opts.onDragStart === "function") opts.onDragStart(session.fromId);
+        }
+        if (session.settling) return;
+        const motion = motionAt(x, y);
+        if (motion && typeof opts.onDragMove === "function") opts.onDragMove(motion);
+      },
+      async onPointerUp(ev) {
+        if (!session || ev && ev.pointerId != null && ev.pointerId !== session.pointerId) return;
+        const x = ev && ev.clientX != null ? ev.clientX : session.lastX;
+        const y = ev && ev.clientY != null ? ev.clientY : session.lastY;
+        if (!session.started) {
+          clear();
+          return;
+        }
+        session.settling = true;
+        const mine = session;
+        const motion = motionAt(x, y);
+        if (typeof opts.onSettle === "function") await opts.onSettle(motion);
+        if (session !== mine) return;
+        const nextIds = motion && motion.nextIds;
+        clear({ keepPaint: !!nextIds });
+        if (nextIds && typeof opts.commit === "function") await opts.commit(nextIds);
+      },
+      cancel() {
+        clear();
+      }
+    };
+  }
+
   // ui/views/queue.js
-  var selectState = { mode: false, ids: /* @__PURE__ */ new Set() };
+  var selectState2 = { mode: false, ids: /* @__PURE__ */ new Set() };
   var dragId = null;
+  var pointerDrag = null;
+  var frontClampHint = createFrontClampHint();
+  var playheadRepairInFlight = false;
+  function resolveCurrentPlayhead() {
+    const data2 = getData();
+    const songs = data2.queueSongs || [];
+    const meta = data2.queueMeta;
+    const snap = get();
+    return resolvePlayheadLock({
+      songIds: songs.map((s) => s && s.id),
+      currentSongId: currentSongId(snap),
+      phase: snap && snap.phase,
+      podcastPlaylistId: meta && meta.playlistId,
+      sourcePlaylistId: snap && snap.sourcePlaylistId
+    });
+  }
+  function currentFrontLock() {
+    return resolveCurrentPlayhead().lockedSongId;
+  }
+  function maybeHintFrontClamp(clamped) {
+    const phase = resolveCurrentPlayhead().phase;
+    const msg = frontClampHint.take(clamped, phase);
+    if (msg) notify(msg, "warn");
+  }
+  function maybeHintMovedToFirst(beforeIds, nextIds, fromId) {
+    if (currentFrontLock()) return;
+    const from = Number(fromId);
+    const before = (Array.isArray(beforeIds) ? beforeIds : []).map(Number);
+    const next = (Array.isArray(nextIds) ? nextIds : []).map(Number);
+    if (!Number.isFinite(from) || !next.length) return;
+    if (next[0] === from && before[0] !== from) {
+      notify(FRONT_MOVED_TO_FIRST, "ok");
+    }
+  }
+  async function maybeRepairPlayheadOrder() {
+    if (playheadRepairInFlight) return;
+    if (pointerDrag && pointerDrag.isActive()) return;
+    const resolved = resolveCurrentPlayhead();
+    if (!resolved.needsRepair || resolved.lockedSongId == null) return;
+    const ids = (getData().queueSongs || []).map((s) => s && s.id);
+    const next = planPinSongToFront(ids, resolved.lockedSongId);
+    if (!next) return;
+    playheadRepairInFlight = true;
+    try {
+      await reorderQueue(next);
+    } catch (_) {
+    } finally {
+      playheadRepairInFlight = false;
+    }
+  }
   function isMobile() {
     return window.matchMedia("(max-width: 720px)").matches;
   }
@@ -3490,19 +5035,13 @@
     syncQueueToggleButtons(next);
   }
   function syncQueueToggleButtons(open) {
-    const label = open ? "\u9690\u85CF\u64AD\u653E\u5217\u8868" : "\u663E\u793A\u64AD\u653E\u5217\u8868";
+    const label = open ? "\u9690\u85CF\u300C\u64AD\u5BA2\u300D\u5217\u8868" : "\u663E\u793A\u300C\u64AD\u5BA2\u300D\u5217\u8868";
     const btnTop = $("btnToggleQueue");
     if (btnTop) {
       btnTop.setAttribute("aria-pressed", open ? "true" : "false");
       btnTop.setAttribute("title", label);
       btnTop.setAttribute("aria-label", label);
-      setButtonIcon(btnTop, open ? "panelRightClose" : "panelRight", 17);
-    }
-    const btnInline = $("btnToggleQueueInline");
-    if (btnInline) {
-      btnInline.setAttribute("aria-pressed", open ? "true" : "false");
-      btnInline.setAttribute("title", label);
-      btnInline.setAttribute("aria-label", label);
+      setButtonIcon(btnTop, "listMusic", 17);
     }
   }
   function toggleQueue() {
@@ -3511,16 +5050,17 @@
   function syncSelectUi() {
     const bar = $("queueSelectBar");
     const del2 = $("btnQueueDeleteSelected");
-    setHidden(bar, !selectState.mode);
-    if (del2) del2.disabled = selectState.ids.size === 0;
+    setHidden(bar, !selectState2.mode);
+    if (del2) del2.disabled = selectState2.ids.size === 0;
   }
   function setSelectMode(on) {
-    selectState.mode = !!on;
-    if (!on) selectState.ids.clear();
+    selectState2.mode = !!on;
+    if (!on) selectState2.ids.clear();
     syncSelectUi();
     renderQueue();
   }
   function renderQueue() {
+    if (pointerDrag && pointerDrag.isActive()) return;
     const data2 = getData();
     const songs = data2.queueSongs || [];
     const meta = data2.queueMeta;
@@ -3532,15 +5072,23 @@
     if (!box) return;
     const replaceBtn = document.querySelector('[data-queue-act="replace"]');
     if (replaceBtn) replaceBtn.disabled = !songs.length;
+    box.classList.remove("is-skeleton");
     if (!songs.length) {
-      box.innerHTML = '<div class="empty">\u64AD\u653E\u5217\u8868\u4E3A\u7A7A\u3002\u5728\u300C\u66F4\u65B0\u300D\u91CC\u52A0\u5165\u5355\u96C6\u3002</div>';
+      if (box.dataset.bootPending === "1") {
+        syncSelectUi();
+        return;
+      }
+      box.innerHTML = '<div class="empty">\u300C\u64AD\u5BA2\u300D\u5217\u8868\u4E3A\u7A7A\u3002\u5728\u300C\u66F4\u65B0\u300D\u91CC\u52A0\u5165\u5355\u96C6\uFF0C\u70B9\u64AD\u653E\u65F6\u4F1A\u4ECE\u8FD9\u4E00\u96C6\u5F00\u59CB\u987A\u5E8F\u64AD\u5B8C\u3002</div>';
       syncSelectUi();
       return;
     }
+    delete box.dataset.bootPending;
     box.innerHTML = songs.map((s, idx) => {
       const pending = !!s.pending;
-      const selected = selectState.ids.has(s.id);
-      const lead = pending ? `<span class="q-pending-lead" aria-hidden="true"></span>` : selectState.mode ? `<input type="checkbox" class="sel-box" data-sel="${s.id}" ${selected ? "checked" : ""} aria-label="\u9009\u62E9" />` : `<span class="drag-handle" title="\u62D6\u62FD\u6392\u5E8F" aria-hidden="true">${icon("gripVertical", 16)}</span>`;
+      const selected = selectState2.ids.has(s.id);
+      const lockedId = currentFrontLock();
+      const frontLocked = !pending && lockedId != null && Number(s.id) === Number(lockedId);
+      const lead = pending ? `<span class="q-pending-lead" aria-hidden="true"></span>` : selectState2.mode ? `<input type="checkbox" class="sel-box" data-sel="${s.id}" ${selected ? "checked" : ""} aria-label="\u9009\u62E9" />` : frontLocked ? `<span class="drag-handle drag-handle--locked" title="${FRONT_LOCKED_LABEL}" aria-label="${FRONT_LOCKED_LABEL}">${icon("gripVertical", 16)}</span>` : `<span class="drag-handle" title="\u62D6\u62FD\u6392\u5E8F" aria-hidden="true">${icon("gripVertical", 16)}</span>`;
       const more = pending ? "" : moreMenuHtml(
         [
           { key: "cast", label: "\u6295\u653E\u5230\u97F3\u7BB1", iconName: "speaker", attrs: `data-idx="${idx}"` },
@@ -3564,8 +5112,9 @@
         idx,
         {
           showDate: false,
-          extraClass: "q-row",
+          extraClass: frontLocked ? "q-row is-front-locked" : "q-row",
           pending,
+          fromWaitlist: true,
           leadHtml: lead,
           actions: [
             {
@@ -3576,18 +5125,18 @@
               attrs: `aria-pressed="${s.favorited ? "true" : "false"}" ` + (pending || !(s.feedUrl && s.guid) ? "disabled" : "")
             }
           ],
-          moreHtml: pending || selectState.mode ? "" : more
+          moreHtml: pending || selectState2.mode ? "" : more
         }
       );
       return row;
     }).join("");
-    if (selectState.mode) {
+    if (selectState2.mode) {
       box.querySelectorAll("input[data-sel]").forEach((input) => {
         input.addEventListener("click", (ev) => ev.stopPropagation());
         input.addEventListener("change", () => {
           const id = Number(input.getAttribute("data-sel"));
-          if (input.checked) selectState.ids.add(id);
-          else selectState.ids.delete(id);
+          if (input.checked) selectState2.ids.add(id);
+          else selectState2.ids.delete(id);
           syncSelectUi();
         });
       });
@@ -3598,8 +5147,8 @@
           if (!input) return;
           input.checked = !input.checked;
           const id = Number(input.getAttribute("data-sel"));
-          if (input.checked) selectState.ids.add(id);
-          else selectState.ids.delete(id);
+          if (input.checked) selectState2.ids.add(id);
+          else selectState2.ids.delete(id);
           syncSelectUi();
         });
       });
@@ -3607,6 +5156,7 @@
       return;
     }
     bindRowInteractions(box, songs, {
+      playOpts: { fromWaitlist: true },
       remove: async (ep, idx) => {
         const id = songs[idx] && songs[idx].id;
         if (id == null) return;
@@ -3615,7 +5165,8 @@
       cast: async (ep, idx) => {
         const song = songs[idx];
         if (!song) return;
-        await castToSpeaker(song.id);
+        const songIds = songs.map((s) => Number(s && s.id)).filter((id) => Number.isFinite(id) && id > 0);
+        await castQueueToSpeaker({ songIds, songId: song.id });
       },
       fav: async (ep, idx, btn) => {
         const song = songs[idx];
@@ -3636,71 +5187,368 @@
       }
     });
     wireDragAndDrop(box);
+    syncQueueFrontLock();
     syncSelectUi();
   }
-  function wireDragAndDrop(box) {
+  function clearDragMarks(box) {
+    box.querySelectorAll("[data-row]").forEach((row) => {
+      row.classList.remove(
+        "dragging",
+        "drag-over",
+        "is-lifted",
+        "is-shifting",
+        "is-settling",
+        "is-drop-after-front"
+      );
+      row.style.transform = "";
+    });
+  }
+  function markDropAfterFront(box, on) {
+    const songs = getData().queueSongs || [];
+    const second = songs[1];
+    box.querySelectorAll("[data-row]").forEach((row) => {
+      const id = Number(row.getAttribute("data-song-id"));
+      row.classList.toggle("is-drop-after-front", !!(on && second && id === Number(second.id)));
+    });
+  }
+  function rowBoxes(box) {
+    return Array.from(box.querySelectorAll("[data-row]")).map((row) => {
+      const rect = row.getBoundingClientRect();
+      return {
+        id: Number(row.getAttribute("data-song-id")),
+        top: rect.top,
+        bottom: rect.bottom
+      };
+    });
+  }
+  function prefersReducedMotion() {
+    return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }
+  function motionTransform(x, y) {
+    return "translate(" + (Number(x) || 0) + "px, " + (Number(y) || 0) + "px)";
+  }
+  function paintPointerMotion(box, fromId, motion, settling) {
+    if (!motion) return;
+    const shifts = motion.shifts || [];
+    markDropAfterFront(box, !!(motion.clampedToNext || currentFrontLock() && motion.toIndex === 1));
+    box.querySelectorAll("[data-row]").forEach((row) => {
+      const id = Number(row.getAttribute("data-song-id"));
+      if (id === fromId) {
+        const t = settling ? motion.settle : motion.follow;
+        row.classList.add("is-lifted");
+        row.classList.toggle("is-settling", !!settling);
+        row.classList.remove("is-shifting", "drag-over", "dragging");
+        row.style.transform = motionTransform(t && t.x, t && t.y);
+        return;
+      }
+      const shift = shifts.find((s) => s.id === id);
+      row.classList.add("is-shifting");
+      row.classList.remove("is-lifted", "is-settling", "drag-over");
+      row.style.transform = motionTransform(0, shift ? shift.y : 0);
+    });
+  }
+  function waitForRowSettle(row, reduced) {
+    const ms = settleDurationMs(reduced);
+    if (!ms || !row) return Promise.resolve();
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        row.removeEventListener("transitionend", onEnd);
+        resolve();
+      };
+      const onEnd = (ev) => {
+        if (!ev || ev.propertyName === "transform") finish();
+      };
+      row.addEventListener("transitionend", onEnd);
+      setTimeout(finish, ms + 40);
+    });
+  }
+  function wirePointerReorder(box) {
+    let lastPointer = null;
+    let scrollRaf = 0;
+    function stopAutoScroll() {
+      if (scrollRaf) cancelAnimationFrame(scrollRaf);
+      scrollRaf = 0;
+    }
+    function tickAutoScroll() {
+      if (!pointerDrag || !pointerDrag.isActive() || !lastPointer) {
+        stopAutoScroll();
+        return;
+      }
+      scrollRaf = requestAnimationFrame(() => {
+        if (!pointerDrag || !pointerDrag.isActive() || !lastPointer) {
+          stopAutoScroll();
+          return;
+        }
+        const view = box.getBoundingClientRect();
+        const delta = autoScrollDelta({
+          pointerY: lastPointer.clientY,
+          viewTop: view.top,
+          viewBottom: view.bottom,
+          scrollTop: box.scrollTop,
+          scrollHeight: box.scrollHeight,
+          clientHeight: box.clientHeight
+        });
+        if (delta) {
+          box.scrollTop += delta;
+          pointerDrag.onPointerMove(lastPointer);
+        }
+        tickAutoScroll();
+      });
+    }
+    pointerDrag = createQueuePointerDrag({
+      getRows: () => rowBoxes(box),
+      getScrollTop: () => box.scrollTop,
+      threshold: 8,
+      getLockedSongId: currentFrontLock,
+      onDragStart(fromId) {
+        frontClampHint.reset();
+        const row = box.querySelector('[data-song-id="' + fromId + '"]');
+        if (row) row.classList.add("is-lifted");
+        tickAutoScroll();
+      },
+      onDragMove(motion) {
+        if (!motion) return;
+        paintPointerMotion(box, motion.fromId, motion, false);
+      },
+      async onSettle(motion) {
+        stopAutoScroll();
+        if (!motion) return;
+        const lifted = box.querySelector('[data-song-id="' + motion.fromId + '"]') || box.querySelector(".q-row.is-lifted");
+        const reduced = prefersReducedMotion();
+        paintPointerMotion(box, motion.fromId, motion, false);
+        if (lifted) lifted.getBoundingClientRect();
+        paintPointerMotion(box, motion.fromId, motion, true);
+        await waitForRowSettle(lifted, reduced);
+        maybeHintFrontClamp(motion && motion.clampedToNext);
+      },
+      onDragEnd(info) {
+        stopAutoScroll();
+        lastPointer = null;
+        if (!(info && info.keepPaint)) clearDragMarks(box);
+      },
+      commit: applyOrderIds
+    });
+    box.querySelectorAll("[data-row] .drag-handle").forEach((handle) => {
+      const row = handle.closest("[data-row]");
+      const songId = Number(row && row.getAttribute("data-song-id"));
+      if (!Number.isFinite(songId)) return;
+      handle.addEventListener("pointerdown", (ev) => {
+        lastPointer = ev;
+        pointerDrag.onPointerDown(ev, songId);
+        try {
+          handle.setPointerCapture(ev.pointerId);
+        } catch (_) {
+        }
+      });
+      handle.addEventListener("pointermove", (ev) => {
+        lastPointer = ev;
+        pointerDrag.onPointerMove(ev);
+      });
+      handle.addEventListener("pointerup", (ev) => {
+        lastPointer = ev;
+        pointerDrag.onPointerUp(ev);
+      });
+      handle.addEventListener("pointercancel", () => {
+        lastPointer = null;
+        stopAutoScroll();
+        pointerDrag.cancel();
+      });
+    });
+  }
+  function wireHtml5Reorder(box) {
+    const lockedId = currentFrontLock();
     box.querySelectorAll("[data-row]").forEach((row) => {
       const songId = Number(row.getAttribute("data-song-id"));
-      row.setAttribute("draggable", "true");
+      const locked = lockedId != null && songId === Number(lockedId);
+      row.setAttribute("draggable", locked ? "false" : "true");
+      if (locked) row.draggable = false;
       row.querySelectorAll(".actions-row, button, a, input").forEach((el2) => {
         el2.addEventListener("mousedown", () => {
           row.draggable = false;
         });
         el2.addEventListener("mouseup", () => {
-          row.draggable = true;
+          if (!locked) row.draggable = true;
         });
         el2.addEventListener("mouseleave", () => {
-          row.draggable = true;
+          if (!locked) row.draggable = true;
         });
       });
-      row.addEventListener("dragstart", (ev) => {
-        dragId = songId;
-        row.classList.add("dragging");
-        try {
-          ev.dataTransfer.effectAllowed = "move";
-          ev.dataTransfer.setData("text/plain", String(songId));
-        } catch (_) {
-        }
-      });
+      if (locked) {
+        row.addEventListener("dragstart", (ev) => {
+          ev.preventDefault();
+        });
+      } else {
+        row.addEventListener("dragstart", (ev) => {
+          frontClampHint.reset();
+          dragId = songId;
+          row.classList.add("dragging");
+          try {
+            ev.dataTransfer.effectAllowed = "move";
+            ev.dataTransfer.setData("text/plain", String(songId));
+          } catch (_) {
+          }
+        });
+      }
       row.addEventListener("dragend", () => {
         row.classList.remove("dragging");
-        row.draggable = true;
+        if (!locked) row.draggable = true;
         box.querySelectorAll(".drag-over").forEach((el2) => el2.classList.remove("drag-over"));
+        markDropAfterFront(box, false);
         dragId = null;
       });
       row.addEventListener("dragover", (ev) => {
         ev.preventDefault();
-        row.classList.add("drag-over");
+        const overLocked = lockedId != null && songId === Number(lockedId);
+        if (overLocked) {
+          row.classList.remove("drag-over");
+          markDropAfterFront(box, true);
+        } else {
+          markDropAfterFront(box, false);
+          row.classList.add("drag-over");
+        }
         try {
-          ev.dataTransfer.dropEffect = "move";
+          ev.dataTransfer.dropEffect = overLocked ? "none" : "move";
         } catch (_) {
         }
       });
-      row.addEventListener("dragleave", () => row.classList.remove("drag-over"));
+      row.addEventListener("dragleave", () => {
+        row.classList.remove("drag-over");
+        if (lockedId != null && songId === Number(lockedId)) markDropAfterFront(box, false);
+      });
       row.addEventListener("drop", async (ev) => {
         ev.preventDefault();
         row.classList.remove("drag-over");
+        markDropAfterFront(box, false);
         const toId = Number(row.getAttribute("data-song-id"));
         const fromId = dragId != null ? dragId : Number(ev.dataTransfer.getData("text/plain"));
         await applyOrder(fromId, toId);
       });
     });
   }
+  function wireDragAndDrop(box) {
+    const html5 = useHtml5RowDrag({
+      pointerFine: window.matchMedia("(pointer: fine)").matches,
+      mobile: isMobile()
+    });
+    if (html5) {
+      pointerDrag = null;
+      wireHtml5Reorder(box);
+    } else {
+      box.querySelectorAll("[data-row]").forEach((row) => {
+        row.setAttribute("draggable", "false");
+      });
+      wirePointerReorder(box);
+    }
+  }
   async function applyOrder(fromId, toId) {
-    if (fromId == null || toId == null || fromId === toId) return;
     const ids = (getData().queueSongs || []).map((s) => s.id);
-    const from = ids.indexOf(fromId);
-    if (from < 0 || ids.indexOf(toId) < 0) return;
-    const next = ids.slice();
-    const [moved] = next.splice(from, 1);
-    const insertAt = next.indexOf(toId);
-    if (insertAt < 0) return;
-    next.splice(insertAt, 0, moved);
+    const result = planReorderResult(ids, fromId, toId, currentFrontLock());
+    if (result.blocked) return;
+    maybeHintFrontClamp(result.clampedToNext);
+    if (!result.next) return;
+    maybeHintMovedToFirst(ids, result.next, fromId);
+    await reorderQueue(result.next);
+  }
+  async function applyOrderIds(nextIds) {
+    const before = (getData().queueSongs || []).map((s) => s.id);
+    let next = (Array.isArray(nextIds) ? nextIds : []).map(Number).filter(Number.isFinite);
+    if (!next.length) return;
+    const locked = currentFrontLock();
+    if (locked && next[0] !== locked) {
+      const seen = /* @__PURE__ */ new Set();
+      const fixed = [];
+      for (const id of [locked, ...next]) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        fixed.push(id);
+      }
+      next = fixed;
+      maybeHintFrontClamp(true);
+    } else {
+      maybeHintMovedToFirst(before, next, next[0]);
+    }
     await reorderQueue(next);
+  }
+  function scrollQueueListToTop() {
+    const box = $("queueList");
+    if (box) box.scrollTop = 0;
+  }
+  function flashPinnedRow(songId) {
+    const box = $("queueList");
+    if (!box) return;
+    const row = box.querySelector('[data-song-id="' + Number(songId) + '"]') || box.querySelector("[data-row]");
+    if (!row) return;
+    row.classList.remove("is-pin-flash");
+    void row.offsetWidth;
+    row.classList.add("is-pin-flash");
+  }
+  async function animatePinToFront(songId) {
+    const box = $("queueList");
+    if (!box) return;
+    const id = Number(songId);
+    const row = Number.isFinite(id) ? box.querySelector('[data-song-id="' + id + '"]') : null;
+    if (!row) return;
+    const reduced = prefersReducedMotion();
+    const slots = rowSlotsFromBoxes(rowBoxes(box));
+    const motion = planPinToFrontMotion(slots, id);
+    if (motion.kind !== "move") return;
+    row.classList.add("is-lifted");
+    paintPointerMotion(box, id, motion, false);
+    row.getBoundingClientRect();
+    paintPointerMotion(box, id, motion, true);
+    await waitForRowSettle(row, reduced);
+    clearDragMarks(box);
+  }
+  function syncQueueFrontLock() {
+    const box = $("queueList");
+    if (!box || pointerDrag && pointerDrag.isActive()) return;
+    const lockedId = currentFrontLock();
+    const html5 = useHtml5RowDrag({
+      pointerFine: window.matchMedia("(pointer: fine)").matches,
+      mobile: isMobile()
+    });
+    box.querySelectorAll("[data-row]").forEach((row) => {
+      const songId = Number(row.getAttribute("data-song-id"));
+      const locked = lockedId != null && songId === Number(lockedId);
+      row.classList.toggle("is-front-locked", locked);
+      if (html5) {
+        row.setAttribute("draggable", locked ? "false" : "true");
+        row.draggable = !locked;
+      }
+      const handle = row.querySelector(".drag-handle");
+      if (!handle) return;
+      handle.classList.toggle("drag-handle--locked", locked);
+      if (locked) {
+        handle.setAttribute("title", FRONT_LOCKED_LABEL);
+        handle.setAttribute("aria-label", FRONT_LOCKED_LABEL);
+        handle.removeAttribute("aria-hidden");
+      } else {
+        handle.setAttribute("title", "\u62D6\u62FD\u6392\u5E8F");
+        handle.setAttribute("aria-hidden", "true");
+        handle.removeAttribute("aria-label");
+      }
+    });
   }
   function bindQueuePanel() {
     onQueueViewChange(() => renderQueue());
+    onChange(() => {
+      syncQueueFrontLock();
+      void maybeRepairPlayheadOrder();
+    });
     onEnsureQueueVisible(() => setQueueOpen(true));
+    setQueuePinRunner(async (phase, songId) => {
+      if (phase === "before") {
+        await animatePinToFront(songId);
+        return;
+      }
+      if (phase === "after") {
+        scrollQueueListToTop();
+        flashPinnedRow(songId);
+      }
+    });
     const panel = $("queuePanel");
     const backdrop = $("queueBackdrop");
     if (backdrop) backdrop.addEventListener("click", () => setQueueOpen(false));
@@ -3712,8 +5560,6 @@
     }
     const btnTop = $("btnToggleQueue");
     if (btnTop) btnTop.addEventListener("click", () => toggleQueue());
-    const btnInline = $("btnToggleQueueInline");
-    if (btnInline) btnInline.addEventListener("click", () => toggleQueue());
     const menuBtn = $("btnQueueMenu");
     if (menuBtn) {
       menuBtn.addEventListener("click", (ev) => {
@@ -3727,11 +5573,14 @@
           ev.stopPropagation();
           closePopovers();
           const act = btn.getAttribute("data-queue-act");
-          if (act === "select") setSelectMode(!selectState.mode);
+          if (act === "select") setSelectMode(!selectState2.mode);
           else if (act === "remove-played") await removePlayed();
           else if (act === "cast-all") await castQueueToSpeaker();
-          else if (act === "refresh") await reloadQueue();
-          else if (act === "replace") await replaceQueueAndPlay2();
+          else if (act === "refresh") {
+            renderQueue();
+            await reloadQueue();
+            renderQueue();
+          } else if (act === "replace") await replaceQueueAndPlay2();
           else if (act === "clear") await clearQueue();
         });
       });
@@ -3741,11 +5590,11 @@
     const del2 = $("btnQueueDeleteSelected");
     if (del2) {
       del2.addEventListener("click", async () => {
-        const ids = Array.from(selectState.ids);
+        const ids = Array.from(selectState2.ids);
         if (!ids.length) return;
         const ok = await uiConfirm({
           title: "\u5220\u9664\u6240\u9009",
-          message: `\u4ECE\u64AD\u653E\u5217\u8868\u5220\u9664\u9009\u4E2D\u7684 ${ids.length} \u9996\uFF1F`,
+          message: `\u4ECE\u300C\u64AD\u5BA2\u300D\u5217\u8868\u5220\u9664\u9009\u4E2D\u7684 ${ids.length} \u9996\uFF1F`,
           okText: "\u5220\u9664",
           danger: true
         });
@@ -3791,15 +5640,11 @@
       }
       const hint = $("maxEpisodesHint");
       if (hint) {
-        hint.textContent = `\u53EF\u586B 1\u2013${limit}\uFF0C\u9ED8\u8BA4 50\u3002\u8D85\u8FC7 ${limit} \u4F1A\u81EA\u52A8\u6536\u655B\u5230 ${limit}\u3002`;
+        hint.textContent = `\u53EF\u586B 1\u2013${limit}\uFF0C\u9ED8\u8BA4 50\u3002\u8FD9\u662F\u81EA\u52A8\u5237\u65B0\u7A97\u53E3\uFF0C\u4E0D\u662F\u5386\u53F2\u7D22\u5F15\u4E0A\u9650\uFF1B\u8D85\u8FC7 ${limit} \u4F1A\u81EA\u52A8\u6536\u655B\u5230 ${limit}\u3002\u66F4\u65E9\u7684\u8282\u76EE\u8BF7\u5728\u9891\u9053\u9875\u6309\u9700\u7D22\u5F15\uFF08\u6309\u9891\u9053\u9009\u62E9\uFF0C\u4E0D\u53D7\u6B64\u6ED1\u5757\u63A7\u5236\uFF09\u3002`;
       }
       const meta = $("scheduleMeta");
       if (meta) {
         meta.textContent = "\u4E0B\u6B21\uFF1A" + (r.scheduleNextDueAt ? fmtTime(r.scheduleNextDueAt) : "\u2014");
-      }
-      const eventsNote = $("playEventsNote");
-      if (eventsNote) {
-        eventsNote.textContent = r.playEventsActive ? "\u8FDB\u5EA6\u4E0E\u6536\u542C\u5386\u53F2\u4FDD\u5B58\u5728\u672C\u63D2\u4EF6\uFF08\u6309\u8282\u76EE feed + \u5355\u96C6 guid\uFF09\u3002\u5DF2\u8BA2\u9605\u5BBF\u4E3B\u64AD\u653E\u4E8B\u4EF6\uFF1A\u5728\u5BBF\u4E3B\u6B4C\u5355 / \u5E95\u680F\u64AD\u653E\u4E14\u80FD\u89E3\u51FA feed+guid \u65F6\u4E5F\u4F1A\u8BB0\u8D26\uFF1B\u89E3\u4E0D\u51FA\u5219\u4E0D\u5199\u810F\u6570\u636E\u3002" : "\u8FDB\u5EA6\u4E0E\u6536\u542C\u5386\u53F2\u4FDD\u5B58\u5728\u672C\u63D2\u4EF6\uFF08\u6309\u8282\u76EE feed + \u5355\u96C6 guid\uFF09\u3002\u5F53\u524D\u672A\u542F\u7528\u5BBF\u4E3B\u64AD\u653E\u4E8B\u4EF6\u8BA2\u9605\uFF1A\u53EA\u6709\u5728\u672C\u63D2\u4EF6\u9875\u70B9\u64AD / \u5165\u961F\u65F6\u4F1A\u5199\u5165\u5386\u53F2\uFF1B\u5BBF\u4E3B\u5176\u5B83\u5165\u53E3\u7684\u64AD\u653E\u4E0D\u4F1A\u81EA\u52A8\u8BB0\u5165\u3002";
       }
     } catch (_) {
     }
@@ -3926,7 +5771,10 @@
         }
         testCast.disabled = true;
         try {
-          await castToSpeaker(cur.songId, { deviceId: selectedDeviceId || void 0 });
+          await castToSpeaker(cur.songId, {
+            deviceId: selectedDeviceId || void 0,
+            forceSingle: true
+          });
         } finally {
           testCast.disabled = false;
         }
@@ -4044,7 +5892,7 @@
     const color = colorFromString(letterSrc === "?" ? "" : letterSrc);
     const ph = `<div class="cover-ph" style="background:${color}" aria-hidden="true">${escapeHtml(letter)}</div>`;
     if (!candidates.length) return ph;
-    return `<img class="ep-cover" src="${escapeHtml(candidates[0])}" alt="" loading="lazy" data-history-cover="1" data-cover-candidates="${escapeHtml(JSON.stringify(candidates))}" data-cover-letter="${escapeHtml(letter)}" data-cover-color="${escapeHtml(color)}" />`;
+    return `<img class="ep-cover" src="${escapeHtml(candidates[0])}" alt="" loading="lazy" referrerpolicy="no-referrer" data-history-cover="1" data-cover-candidates="${escapeHtml(JSON.stringify(candidates))}" data-cover-letter="${escapeHtml(letter)}" data-cover-color="${escapeHtml(color)}" />`;
   }
   function uniqueAbsolute(urls) {
     const out = [];
@@ -4284,7 +6132,7 @@
   var COMPLETED_NEAR_END_SEC = 3;
   var query2 = "";
   var filter = "all";
-  var selectState2 = { mode: false, keys: /* @__PURE__ */ new Set() };
+  var selectState3 = { mode: false, keys: /* @__PURE__ */ new Set() };
   var unbindHistoryCovers = null;
   function disposeHistoryCovers() {
     if (typeof unbindHistoryCovers === "function") {
@@ -4334,21 +6182,21 @@
     const del2 = $("btnHistoryDeleteSelected");
     const count = $("historySelectCount");
     const toggle = $("btnHistorySelect");
-    setHidden(bar, !selectState2.mode);
-    if (del2) del2.disabled = selectState2.keys.size === 0;
+    setHidden(bar, !selectState3.mode);
+    if (del2) del2.disabled = selectState3.keys.size === 0;
     if (count) {
-      count.textContent = selectState2.mode ? selectState2.keys.size ? `\u5DF2\u9009 ${selectState2.keys.size} \u6761` : "\u70B9\u9009\u6761\u76EE" : "";
+      count.textContent = selectState3.mode ? selectState3.keys.size ? `\u5DF2\u9009 ${selectState3.keys.size} \u6761` : "\u70B9\u9009\u6761\u76EE" : "";
     }
     if (toggle) {
-      toggle.classList.toggle("is-on", selectState2.mode);
-      toggle.setAttribute("aria-pressed", selectState2.mode ? "true" : "false");
-      toggle.title = selectState2.mode ? "\u9000\u51FA\u591A\u9009" : "\u591A\u9009";
+      toggle.classList.toggle("is-on", selectState3.mode);
+      toggle.setAttribute("aria-pressed", selectState3.mode ? "true" : "false");
+      toggle.title = selectState3.mode ? "\u9000\u51FA\u591A\u9009" : "\u591A\u9009";
       setButtonIcon(toggle, "listChecks", 16);
     }
   }
   function setSelectMode2(on) {
-    selectState2.mode = !!on;
-    if (!on) selectState2.keys.clear();
+    selectState3.mode = !!on;
+    if (!on) selectState3.keys.clear();
     syncSelectUi2();
     renderHistory();
   }
@@ -4361,11 +6209,17 @@
     if (!box) return;
     disposeHistoryCovers();
     const all = getData().history || [];
+    box.classList.remove("is-skeleton");
     if (!all.length) {
+      if (box.dataset.bootPending === "1") {
+        syncSelectUi2();
+        return;
+      }
       box.innerHTML = '<div class="empty">\u8FD8\u6CA1\u6709\u6536\u542C\u8BB0\u5F55</div>';
       syncSelectUi2();
       return;
     }
+    delete box.dataset.bootPending;
     const items = filtered2(all);
     if (!items.length) {
       box.innerHTML = `<div class="empty">${filter === "completed" && !query2.trim() ? "\u6CA1\u6709\u5DF2\u542C\u5B8C\u7684\u8BB0\u5F55" : "\u6CA1\u6709\u5339\u914D\u7684\u8BB0\u5F55"}</div>`;
@@ -4377,7 +6231,7 @@
     const queueIndex = buildQueueIndex(getData().queueSongs);
     box.innerHTML = rows.map((entry, idx) => {
       const key = entryKey(entry);
-      const lead = selectState2.mode ? `<input type="checkbox" class="sel-box" data-sel-key="${escapeHtml(key)}" ${selectState2.keys.has(key) ? "checked" : ""} aria-label="\u9009\u62E9" />` : "";
+      const lead = selectState3.mode ? `<input type="checkbox" class="sel-box" data-sel-key="${escapeHtml(key)}" ${selectState3.keys.has(key) ? "checked" : ""} aria-label="\u9009\u62E9" />` : "";
       const queueState = queueButtonState(entry, queueIndex);
       const more = moreMenuHtml(
         [
@@ -4406,7 +6260,7 @@
           channelCoverUrl: channelCoverFromSubs(entry.feedUrl, subs)
         }),
         leadHtml: lead,
-        actions: selectState2.mode ? [] : [
+        actions: selectState3.mode ? [] : [
           {
             act: "fav",
             iconName: "star",
@@ -4415,18 +6269,18 @@
             attrs: `aria-pressed="${entry.favorited ? "true" : "false"}"`
           }
         ],
-        moreHtml: selectState2.mode ? "" : more
+        moreHtml: selectState3.mode ? "" : more
       });
     }).join("");
     unbindHistoryCovers = bindHistoryCoverRoot(box);
-    if (selectState2.mode) {
+    if (selectState3.mode) {
       box.querySelectorAll("input[data-sel-key]").forEach((input) => {
         input.addEventListener("click", (ev) => ev.stopPropagation());
         input.addEventListener("change", () => {
           const key = input.getAttribute("data-sel-key");
           if (!key) return;
-          if (input.checked) selectState2.keys.add(key);
-          else selectState2.keys.delete(key);
+          if (input.checked) selectState3.keys.add(key);
+          else selectState3.keys.delete(key);
           syncSelectUi2();
         });
       });
@@ -4438,8 +6292,8 @@
           input.checked = !input.checked;
           const key = input.getAttribute("data-sel-key");
           if (!key) return;
-          if (input.checked) selectState2.keys.add(key);
-          else selectState2.keys.delete(key);
+          if (input.checked) selectState3.keys.add(key);
+          else selectState3.keys.delete(key);
           syncSelectUi2();
         });
       });
@@ -4508,7 +6362,7 @@
     }
     const selectBtn = $("btnHistorySelect");
     if (selectBtn) {
-      selectBtn.addEventListener("click", () => setSelectMode2(!selectState2.mode));
+      selectBtn.addEventListener("click", () => setSelectMode2(!selectState3.mode));
     }
     const cancel = $("btnHistorySelectCancel");
     if (cancel) cancel.addEventListener("click", () => setSelectMode2(false));
@@ -4516,7 +6370,7 @@
     if (del2) {
       del2.addEventListener("click", async () => {
         const all = getData().history || [];
-        const selected = all.filter((h) => selectState2.keys.has(entryKey(h)));
+        const selected = all.filter((h) => selectState3.keys.has(entryKey(h)));
         if (!selected.length) return;
         const ok = await batchDeleteHistoryItems(selected);
         if (ok) {
@@ -4531,6 +6385,7 @@
     });
   }
   async function loadHistoryView() {
+    renderHistory();
     await reloadHistory();
     renderHistory();
   }
@@ -4538,6 +6393,34 @@
   // ui/main.js
   var TABS = ["recent", "favorites", "history", "subs", "settings"];
   var activeTab = "recent";
+  var bootFeedRefreshStarted = false;
+  var SCROLL_IDS = ["recentList", "historyList", "queueList", "subList"];
+  function readScrolls() {
+    const scrolls = {};
+    for (const id of SCROLL_IDS) {
+      const el2 = $(id);
+      if (el2) scrolls[id] = el2.scrollTop || 0;
+    }
+    return scrolls;
+  }
+  function applyScrolls(scrolls) {
+    if (!scrolls || typeof scrolls !== "object") return;
+    for (const id of SCROLL_IDS) {
+      const el2 = $(id);
+      const top = Number(scrolls[id]);
+      if (el2 && Number.isFinite(top)) el2.scrollTop = top;
+    }
+  }
+  function persistUiCache(extra = {}) {
+    saveUiCache({
+      ...cacheFromStoreData(getData(), {
+        activeTab,
+        queueOpen: !!getData().queueOpen,
+        scrolls: readScrolls()
+      }),
+      ...extra
+    });
+  }
   function switchTab(name) {
     if (!TABS.includes(name) || name === activeTab) {
       if (TABS.includes(name)) {
@@ -4564,6 +6447,7 @@
     }
     if (name === "recent") renderRecent();
     refreshBackToTopTargets();
+    persistUiCache();
   }
   function bindNav() {
     document.querySelectorAll(".nav button").forEach((btn) => {
@@ -4571,7 +6455,6 @@
     });
   }
   function renderAll() {
-    renderPlayerBar(get());
     paintRows(get());
     renderQueue();
     if (activeTab === "recent") renderRecent();
@@ -4580,20 +6463,103 @@
     if (activeTab === "subs") renderSubs();
   }
   async function refreshFromHost() {
+    const snapshotBeforeReload = {
+      recent: (getData().recent || []).slice(),
+      history: (getData().history || []).slice(),
+      favorites: (getData().favorites || []).slice(),
+      subs: (getData().subs || []).slice(),
+      queueSongs: (getData().queueSongs || []).slice(),
+      queueMeta: getData().queueMeta || null
+    };
     await Promise.allSettled([
       reloadQueue(),
       reloadRecent(),
       reloadFavorites(),
       reloadHistory()
     ]);
+    const retained = retainNonEmptyLists(getData(), snapshotBeforeReload);
+    if (retained.changed) patch(retained.patch);
     renderAll();
+    persistUiCache();
+  }
+  function startEntrySkeletons() {
+    const targets = [
+      {
+        id: "recentList",
+        hasContent: () => (getData().recent || []).length > 0
+      },
+      {
+        id: "historyList",
+        hasContent: () => (getData().history || []).length > 0
+      },
+      {
+        id: "queueList",
+        hasContent: () => (getData().queueSongs || []).length > 0
+      }
+    ];
+    return targets.map((t) => {
+      const gate = createSkeletonGate({
+        delayMs: SKELETON_DELAY_MS,
+        hasContent: t.hasContent,
+        show: () => {
+          const el2 = $(t.id);
+          if (!el2 || t.hasContent()) return;
+          el2.classList.add("is-skeleton");
+          el2.innerHTML = episodeSkeletonHtml(t.id === "queueList" ? 5 : 6);
+        }
+      });
+      gate.start();
+      return gate;
+    });
+  }
+  function hydrateFromUiCache(cache) {
+    if (!hasValidListCache(cache)) return false;
+    patch({
+      recent: cache.recent || [],
+      history: cache.history || [],
+      favorites: cache.favorites || [],
+      subs: cache.subs || [],
+      queueSongs: cache.queueSongs || [],
+      queueMeta: cache.queueMeta || null,
+      queueOpen: !!cache.queueOpen
+    });
+    return true;
+  }
+  function startConditionalFeedRefresh(cache) {
+    if (bootFeedRefreshStarted) return;
+    bootFeedRefreshStarted = true;
+    const localDue = needsInitialFeedRefresh(cache) || shouldBackgroundFeedRefresh(cache);
+    if (!localDue) return;
+    void (async () => {
+      let schedule = null;
+      try {
+        const status = await api.status();
+        schedule = status && status.schedule ? status.schedule : null;
+      } catch (_) {
+        schedule = null;
+      }
+      if (isScheduleFeedFresh(schedule && schedule.lastSuccessAt, schedule && schedule.intervalHours)) {
+        if (schedule && schedule.lastSuccessAt) {
+          markFeedSynced(schedule.lastSuccessAt);
+          persistUiCache({ feedSyncedAt: schedule.lastSuccessAt });
+        }
+        return;
+      }
+      if (!shouldBootFeedRefresh(cache, schedule)) return;
+      try {
+        await requestFeedRefresh({ quietBusy: true });
+        markFeedSynced();
+        persistUiCache({ feedSyncedAt: Date.now() });
+        if (activeTab === "recent") renderRecent();
+        if (activeTab === "subs") renderSubs();
+      } catch (_) {
+      }
+    })();
   }
   async function init() {
     hydrateIconSlots(document);
     bindPopoverDismiss();
     bindNav();
-    bindPlayerBar();
-    bindCoverCache();
     bindRecentToolbar();
     bindRecentQueueState();
     bindFavoritesToolbar();
@@ -4604,10 +6570,26 @@
     bindQueuePanel();
     bindSettings();
     bindBackToTop();
-    renderAll();
+    const cached = loadUiCache();
+    const hadCache = hydrateFromUiCache(cached);
+    for (const id of ["recentList", "historyList", "queueList"]) {
+      const el2 = $(id);
+      if (el2 && !hadCache) el2.dataset.bootPending = "1";
+    }
+    const skeletonGates = hadCache ? [] : startEntrySkeletons();
+    if (hadCache) {
+      if (cached.activeTab && TABS.includes(cached.activeTab)) {
+        activeTab = "recent";
+        switchTab(cached.activeTab);
+      }
+      setQueueOpen(!!cached.queueOpen);
+      renderAll();
+      applyScrolls(cached.scrolls);
+    } else {
+      renderAll();
+    }
     setProgressCapable(true);
     onChange((snap) => {
-      renderPlayerBar(snap);
       paintRows(snap);
       refreshBackToTopTargets();
     });
@@ -4629,10 +6611,37 @@
       ["\u8BA2\u9605\u5217\u8868", reloadSubs],
       ["\u64AD\u653E\u5217\u8868", reloadQueue]
     ];
-    const results = await Promise.allSettled(loads.map(([, fn]) => fn()));
-    const failed = results.map((r, i) => r.status === "rejected" ? loads[i][0] : null).filter(Boolean);
-    if (failed.length) toast(`\u672A\u80FD\u52A0\u8F7D\uFF1A${failed.join("\u3001")}`, "err");
-    renderAll();
+    const snapshotBeforeReload = {
+      recent: (getData().recent || []).slice(),
+      history: (getData().history || []).slice(),
+      favorites: (getData().favorites || []).slice(),
+      subs: (getData().subs || []).slice(),
+      queueSongs: (getData().queueSongs || []).slice(),
+      queueMeta: getData().queueMeta || null
+    };
+    async function finishSoftReload(results) {
+      const failed = results.map((r, i) => r.status === "rejected" ? loads[i][0] : null).filter(Boolean);
+      if (failed.length && !hadCache) toast(`\u672A\u80FD\u52A0\u8F7D\uFF1A${failed.join("\u3001")}`, "err");
+      const retained = retainNonEmptyLists(getData(), snapshotBeforeReload);
+      if (retained.changed) patch(retained.patch);
+      skeletonGates.forEach((g) => g.stop());
+      for (const id of ["recentList", "historyList", "queueList"]) {
+        const el2 = $(id);
+        if (el2) delete el2.dataset.bootPending;
+      }
+      renderAll();
+      if (hadCache && cached && cached.scrolls) applyScrolls(cached.scrolls);
+      persistUiCache(cached && cached.feedSyncedAt ? { feedSyncedAt: cached.feedSyncedAt } : {});
+    }
+    if (hadCache) {
+      Promise.allSettled(loads.map(([, fn]) => fn())).then((results) => finishSoftReload(results)).catch(() => {
+        skeletonGates.forEach((g) => g.stop());
+      });
+    } else {
+      const results = await Promise.allSettled(loads.map(([, fn]) => fn()));
+      await finishSoftReload(results);
+    }
+    startConditionalFeedRefresh(cached);
     startDataSync(refreshFromHost);
     setTimeout(() => {
       refreshFromHost().catch(() => {
@@ -4643,6 +6652,7 @@
       if (wanted && TABS.includes(wanted)) switchTab(wanted);
     } catch (_) {
     }
+    window.addEventListener("pagehide", () => persistUiCache());
   }
   init().catch((e) => {
     toast("\u754C\u9762\u521D\u59CB\u5316\u5931\u8D25\uFF1A" + (e && e.message || e), "err");

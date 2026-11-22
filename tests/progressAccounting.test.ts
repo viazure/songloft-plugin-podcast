@@ -255,6 +255,53 @@ describe("play events (P1)", () => {
     expect(p?.completed).toBe(true);
   });
 
+  it("marks completed on miot finish", async () => {
+    await handlePlayEvent({
+      type: "finish",
+      song: { id: 99, title: "Ep", artist: "Show" },
+      source: "miot",
+      timestamp: 5000,
+    });
+    const p = await getProgress("https://pod.example/feed.xml", "ep-99");
+    expect(p?.completed).toBe(true);
+    const list = await loadHistory();
+    expect(list[0]).toMatchObject({ guid: "ep-99", completed: true });
+  });
+
+  it("does not mark completed on skip", async () => {
+    await handlePlayEvent({
+      type: "play",
+      song: { id: 99, title: "Ep", artist: "Show" },
+      source: "miot",
+      timestamp: 1000,
+    });
+    await handlePlayEvent({
+      type: "skip",
+      song: { id: 99, title: "Ep", artist: "Show" },
+      source: "miot",
+      timestamp: 5000,
+    });
+    const p = await getProgress("https://pod.example/feed.xml", "ep-99");
+    expect(p?.completed).toBeFalsy();
+    const list = await loadHistory();
+    expect(list).toHaveLength(1);
+    expect(list[0].completed).toBeFalsy();
+  });
+
+  it("does not mark completed on play", async () => {
+    await handlePlayEvent({
+      type: "play",
+      song: { id: 99, title: "Ep", artist: "Show" },
+      source: "miot",
+      timestamp: 1000,
+    });
+    const p = await getProgress("https://pod.example/feed.xml", "ep-99");
+    expect(p?.completed).toBeFalsy();
+    const list = await loadHistory();
+    expect(list).toHaveLength(1);
+    expect(list[0].completed).toBeFalsy();
+  });
+
   it("dedupes short-time duplicate play events", async () => {
     await handlePlayEvent({
       type: "play",

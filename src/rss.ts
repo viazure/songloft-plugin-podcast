@@ -3,6 +3,9 @@
  * Focus: channel title/author/image + items with audio enclosure.
  */
 
+import { fetchWithDeadline, isTimeoutError, withDeadline } from "./httpDeadline";
+
+
 export interface RssEnclosure {
   url: string;
   type: string;
@@ -444,12 +447,28 @@ function parseItem(itemXml: string, channelCover: string | null): {
 /**
  * Parse RSS/Atom XML text into channel + audio episodes.
  */
+/** Prefer specific copy when the HTML is clearly a 403 / CDN ACL page. */
+export function reasonForNonRssHtml(xmlRaw: string): string {
+  const head = String(xmlRaw || "").slice(0, 8000);
+  if (
+    /denied by IP ACL/i.test(head) ||
+    /403\s*[·.]?\s*无法访问/i.test(head) ||
+    /<title>[^<]*403[^<]*<\/title>/i.test(head) ||
+    /<h1>[^<]*403[^<]*<\/h1>/i.test(head) ||
+    /403\s+Forbidden/i.test(head) ||
+    /You don't have permission to access/i.test(head)
+  ) {
+    return "源站拒绝访问（CDN/IP 限制或禁止抓取），不是有效的 RSS";
+  }
+  return "返回了 HTML 页面，不是 RSS（可能需要登录或 URL 不对）";
+}
+
 export function parseRssXml(xmlRaw: string): ParseRssResult {
   const xml = String(xmlRaw || "").trim();
   if (!xml) return { ok: false, reason: "空响应：不是有效的 RSS" };
   // Obvious HTML login / error pages
   if (/^<!DOCTYPE html/i.test(xml) || /<html[\s>]/i.test(xml)) {
-    return { ok: false, reason: "返回了 HTML 页面，不是 RSS（可能需要登录或 URL 不对）" };
+    return { ok: false, reason: reasonForNonRssHtml(xml) };
   }
   const channelBlock =
     tagBody(xml, "channel") ||
@@ -459,15 +478,25 @@ export function parseRssXml(xmlRaw: string): ParseRssResult {
     return { ok: false, reason: "无法识别 RSS channel/feed" };
   }
   const scope = channelBlock || xml;
-  const title = textField(scope, ["title"]);
+  // Channel meta must not bleed from the first <item>/<entry> description.
+  const headerCut = scope.search(/<(?:item|entry)\b/i);
+  const header = headerCut >= 0 ? scope.slice(0, headerCut) : scope;
+  const title = textField(header, ["title"]);
   if (!title) {
     return { ok: false, reason: "RSS 缺少 channel title" };
   }
   const author =
-    textField(scope, ["itunes:author", "author", "managingEditor", "dc:creator"]) || null;
-  const link = textField(scope, ["link"]) || null;
-  const description = textField(scope, ["description", "subtitle", "summary"]) || null;
-  const coverUrl = extractImage(scope);
+    textField(header, ["itunes:author", "author", "managingEditor", "dc:creator"]) || null;
+  const link = textField(header, ["link"]) || null;
+  const description =
+    textField(header, [
+      "description",
+      "itunes:summary",
+      "summary",
+      "itunes:subtitle",
+      "subtitle",
+    ]) || null;
+  const coverUrl = extractImage(header) || extractImage(scope);
   const itemBlocks = splitItems(xml);
   const episodes: RssEpisode[] = [];
   let skippedNonAudio = 0;
@@ -514,7 +543,38 @@ export function parseRssXml(xmlRaw: string): ParseRssResult {
   };
 }
 
-export async function fetchRss(url: string, fetchImpl: typeof fetch = fetch): Promise<ParseRssResult> {
+/**
+ * Default wait budget for one RSS GET + body read.
+ * Cast/MiOT uses 8s on LAN; public RSS XML is larger and slower, so 20s.
+ * Timeout abandons waiting only — the host request may still occupy a connection.
+ */
+export const RSS_FETCH_TIMEOUT_MS = 20_000;
+
+/** Human copy for deadline; never surface HttpDeadlineError / raw codes to UI. */
+export const RSS_FETCH_TIMEOUT_REASON = "拉取超时，请稍后再试";
+
+export type FetchRssOptions = {
+  /** Override wait budget (tests). Default {@link RSS_FETCH_TIMEOUT_MS}. */
+  timeoutMs?: number;
+  delay?: (ms: number) => Promise<void>;
+};
+
+/**
+ * Fetch + parse one feed.
+ *
+ * Uses {@link fetchWithDeadline} / {@link withDeadline} (no AbortController).
+ * When the deadline fires we return a failed ParseRssResult immediately so the
+ * caller can release per-channel in-flight (and, later, concurrency slots).
+ * The underlying HTTP may still complete; late results are ignored.
+ *
+ * Index depth only affects how many episodes we *retain* after parse — we always
+ * download the full XML response; we do not truncate the wire body to "go faster".
+ */
+export async function fetchRss(
+  url: string,
+  fetchImpl: typeof fetch = fetch,
+  options: FetchRssOptions = {}
+): Promise<ParseRssResult> {
   const trimmed = String(url || "").trim();
   if (!trimmed) return { ok: false, reason: "URL 为空" };
   let parsedUrl: URL;
@@ -526,26 +586,46 @@ export async function fetchRss(url: string, fetchImpl: typeof fetch = fetch): Pr
   if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
     return { ok: false, reason: "仅支持 http/https RSS" };
   }
-  let res: Response;
+
+  const timeoutMs =
+    typeof options.timeoutMs === "number" && options.timeoutMs > 0
+      ? options.timeoutMs
+      : RSS_FETCH_TIMEOUT_MS;
+
   try {
-    res = await fetchImpl(trimmed, {
-      method: "GET",
-      headers: {
-        Accept: "application/rss+xml, application/xml, text/xml, */*",
-        "User-Agent": "SongloftPodcastPlugin/0.1",
+    const res = await fetchWithDeadline(
+      trimmed,
+      {
+        method: "GET",
+        headers: {
+          Accept: "application/rss+xml, application/xml, text/xml, */*",
+          "User-Agent": "SongloftPodcastPlugin/0.1",
+        },
       },
-    });
+      { timeoutMs, fetchImpl, delay: options.delay }
+    );
+    if (!res.ok) {
+      if (res.status === 403) {
+        return { ok: false, reason: "HTTP 403：源站拒绝访问（可能被 CDN/IP 限制）" };
+      }
+      return { ok: false, reason: `HTTP ${res.status}：无法拉取 RSS` };
+    }
+    let text: string;
+    try {
+      // Separate body budget (same length): abandon waiting if the host stalls
+      // after headers. Settlement here also releases channel in-flight upstream.
+      text = await withDeadline(Promise.resolve(res.text()), {
+        timeoutMs,
+        delay: options.delay,
+        issued: true,
+      });
+    } catch (e) {
+      if (isTimeoutError(e)) return { ok: false, reason: RSS_FETCH_TIMEOUT_REASON };
+      return { ok: false, reason: "读取响应失败，请稍后再试" };
+    }
+    return parseRssXml(text);
   } catch (e) {
-    return { ok: false, reason: `网络错误：${String(e ?? "fetch failed")}` };
+    if (isTimeoutError(e)) return { ok: false, reason: RSS_FETCH_TIMEOUT_REASON };
+    return { ok: false, reason: "网络异常，请检查连接后重试" };
   }
-  if (!res.ok) {
-    return { ok: false, reason: `HTTP ${res.status}：无法拉取 RSS` };
-  }
-  let text: string;
-  try {
-    text = await res.text();
-  } catch (e) {
-    return { ok: false, reason: `读取响应失败：${String(e)}` };
-  }
-  return parseRssXml(text);
 }

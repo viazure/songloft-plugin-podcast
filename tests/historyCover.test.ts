@@ -74,6 +74,7 @@ describe("history cover candidates and letter", () => {
       { channelCoverUrl: "https://cdn.example/show.jpg" }
     );
     expect(html).toContain('src="https://cdn.example/ep.jpg"');
+    expect(html).toContain('referrerpolicy="no-referrer"');
     expect(html).toContain("data-history-cover");
     expect(html).toContain("https://cdn.example/show.jpg");
     expect(html).toContain('alt=""');

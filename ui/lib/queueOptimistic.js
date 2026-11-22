@@ -125,6 +125,49 @@ export function reorderSongs(songs, orderedIds) {
   return next;
 }
 
+/**
+ * Build a local row for an episode that is being pinned but is not yet in
+ * `queueSongs`. Uses the prepared host song id, not a pending placeholder.
+ * @param {object|null|undefined} episode
+ * @param {number} songId
+ */
+export function buildOptimisticPinnedSong(episode, songId) {
+  const id = Number(songId);
+  const cover = (episode && (episode.coverUrl || episode.cover_url)) || "";
+  return {
+    id,
+    title: (episode && episode.title) || "",
+    artist: (episode && (episode.showTitle || episode.artist)) || "",
+    album: (episode && (episode.showTitle || episode.album)) || "",
+    coverUrl: cover || null,
+    cover_url: cover,
+    feedUrl: (episode && episode.feedUrl) || null,
+    guid: (episode && episode.guid) || null,
+    subscriptionId: (episode && episode.subscriptionId) || null,
+    duration: episode && (episode.durationSec != null ? episode.durationSec : episode.duration),
+    favorited: !!(episode && episode.favorited),
+    progress: (episode && episode.progress) || null,
+  };
+}
+
+/**
+ * Optimistic「置顶」: move known rows to `orderedIds`, and if the target
+ * (the first id) is not in the list yet, insert a local row for it at front.
+ * @param {Array<object>} songs
+ * @param {number[]} orderedIds
+ * @param {object|null|undefined} episode
+ */
+export function pinQueueSongsLocally(songs, orderedIds, episode) {
+  const list = Array.isArray(songs) ? songs.slice() : [];
+  const ids = (Array.isArray(orderedIds) ? orderedIds : []).map(Number).filter(Number.isFinite);
+  const targetId = ids.length ? ids[0] : NaN;
+  let nextList = list;
+  if (Number.isFinite(targetId) && !list.some((s) => Number(s && s.id) === targetId)) {
+    nextList = [buildOptimisticPinnedSong(episode, targetId), ...list];
+  }
+  return reorderSongs(nextList, ids.length ? ids : nextList.map((s) => s && s.id));
+}
+
 function episodeIdentity(ep) {
   const feed = String((ep && ep.feedUrl) || "").trim().replace(/\/+$/, "").toLowerCase();
   const guid = String((ep && ep.guid) || "").trim();
